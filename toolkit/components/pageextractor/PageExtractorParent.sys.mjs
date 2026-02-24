@@ -27,16 +27,16 @@ const lazy = XPCOMUtils.declareLazy({
 export class PageExtractorParent extends JSWindowActorParent {
   /**
    * Returns ReaderMode content when the page passes the `isProbablyReaderable` check.
-   * The check can be bypassed to force page content to be retrieved by setting `force`
-   * to true.
+   * The check can be bypassed to force page content to be retrieved by setting
+   * `options.force` to true.
    *
    * @see PageExtractorChild#getReaderModeContent
    *
-   * @param {boolean} force - Bypass the `isProbablyReaderable` check.
-   * @returns {Promise<ExtractionResult>}
+   * @param {Partial<GetTextOptions> & { force?: boolean }} options
+   * @returns {Promise<ExtractionResult | null>}
    */
-  getReaderModeContent(force = false) {
-    return this.sendQuery("PageExtractorParent:GetReaderModeContent", force);
+  getReaderModeContent(options = {}) {
+    return this.sendQuery("PageExtractorParent:GetReaderModeContent", options);
   }
 
   /**
@@ -60,6 +60,9 @@ export class PageExtractorParent extends JSWindowActorParent {
    */
   async getText(options = {}) {
     if (this.#isPDF()) {
+      // PDF text is extracted in the parent process via the Pdfjs actor,
+      // bypassing PageExtractorChild. No post-processing (normalizeWhitespace,
+      // maxLength) is applied; callers receive the raw text.
       const text = await this.browsingContext.currentWindowGlobal
         .getActor("Pdfjs")
         .getTextContent();
@@ -150,10 +153,19 @@ export class PageExtractorParent extends JSWindowActorParent {
                 "PageExtractor"
               );
 
-            actor.waitForPageReady().then(() => {
-              lazy.console.log("Headless PageExtractor is ready", url);
-              actorResolver.resolve(actor);
-            });
+            actor
+              .waitForPageReady()
+              .then(() => {
+                lazy.console.log("Headless PageExtractor is ready", url);
+                actorResolver.resolve(actor);
+              })
+              .catch(() => {
+                actorResolver.reject(
+                  new Error(
+                    "PageExtractor could not run on that page or the page could not be found."
+                  )
+                );
+              });
           } catch (error) {
             // TODO (Bug 2001385) - It would be nice to catch if this is the
             // `about:neterror` page or other similar errors. This will also fail if you

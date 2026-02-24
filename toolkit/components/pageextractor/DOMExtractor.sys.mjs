@@ -263,16 +263,9 @@ class ExtractionContext {
    * @returns {boolean}
    */
   shouldStopExtraction() {
-    const { sufficientLength } = this.#options;
-
-    if (
-      sufficientLength !== undefined &&
-      this.#textContent.length >= sufficientLength
-    ) {
-      return true;
-    }
-
-    return false;
+    const { sufficientLength = Infinity, maxLength = Infinity } = this.#options;
+    const len = this.#textContent.length;
+    return len >= sufficientLength || len >= maxLength;
   }
 
   /**
@@ -332,34 +325,32 @@ class ExtractionContext {
     if (this.#isNodeProcessed(node)) {
       return;
     }
-
     this.#processedNodes.add(node);
 
-    if (isNodeHidden(node)) {
-      return;
-    }
-
-    if (this.maybeOutOfViewport(node)) {
-      // This only can return true when we're capturing just the viewport nodes.
+    if (isNodeHidden(node) || this.maybeOutOfViewport(node)) {
       return;
     }
 
     const element = asHTMLElement(node);
-    const text = asTextNode(node);
-    let innerText = "";
+    const textNode = asTextNode(node);
+    let text = "";
 
     if (element) {
-      if (this.#hasInlineAnchors(element)) {
-        innerText = this.#extractTextWithMarkdownLinks(element);
-      } else {
-        innerText = element.innerText.trim();
-      }
-    } else if (text?.nodeValue) {
-      innerText = text.nodeValue.trim();
+      text = this.#hasInlineAnchors(element)
+        ? this.#extractTextWithMarkdownLinks(element)
+        : element.innerText || "";
+    } else if (textNode) {
+      text = textNode.nodeValue || "";
     }
 
-    if (innerText) {
-      this.#textContent += "\n" + innerText;
+    if (this.#options.normalizeWhitespace) {
+      text = text.replace(WHITESPACE_REGEX, " ");
+    }
+    text = text.trim();
+
+    if (text) {
+      const separator = this.#options.normalizeWhitespace ? " " : "\n";
+      this.#textContent += separator + text;
     }
   }
 

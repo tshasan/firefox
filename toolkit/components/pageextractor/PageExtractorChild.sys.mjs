@@ -32,9 +32,6 @@ const lazy = XPCOMUtils.declareLazy({
   isProbablyReaderable: "resource://gre/modules/Readerable.sys.mjs",
 });
 
-/** @type {ExtractionResult} */
-const EMPTY_EXTRACTION_RESULT = { text: "", links: [], canvasSnapshots: [] };
-
 /**
  * Extract a variety of content from pages for use in a smart window.
  */
@@ -52,18 +49,18 @@ export class PageExtractorChild extends JSWindowActorChild {
     switch (name) {
       case "PageExtractorParent:GetReaderModeContent":
         if (this.isAboutReader()) {
-          const text = this.getAboutReaderContent();
-          return { text: text ?? "", links: [], canvasSnapshots: [] };
+          return this.getAboutReaderContent(data);
         }
         return this.getReaderModeContent(data);
       case "PageExtractorParent:GetText":
         if (this.isAboutReader()) {
-          const text = this.getAboutReaderContent();
-          return {
-            text: text ?? "",
-            links: [],
-            canvasSnapshots: [],
-          };
+          return (
+            this.getAboutReaderContent(data) ?? {
+              text: "",
+              links: [],
+              canvasSnapshots: [],
+            }
+          );
         }
         return this.getText(data);
       case "PageExtractorParent:WaitForPageReady":
@@ -95,36 +92,66 @@ export class PageExtractorChild extends JSWindowActorChild {
   }
 
   /**
+   * Collapse whitespace and/or truncate text based on options.
+   *
+   * @param {string} text
+   * @param {Partial<GetTextOptions>} options
+   * @returns {string}
+   */
+  static #postProcessText(text, options) {
+    if (!text) {
+      return "";
+    }
+    let result = text;
+    if (options.normalizeWhitespace) {
+      result = result.replace(/\s+/g, " ").trim();
+    }
+    const { maxLength } = options;
+    if (maxLength !== undefined && result.length > maxLength) {
+      return result.substring(0, Math.max(0, maxLength));
+    }
+    return result;
+  }
+
+  /**
    * @see PageExtractorParent#getReaderModeContent for docs
    *
-   * @param {boolean} force
-   * @returns {Promise<ExtractionResult>}
+   * @param {Partial<GetTextOptions> & { force?: boolean }} options
+   * @returns {Promise<ExtractionResult | null>}
    */
-  async getReaderModeContent(force) {
+  async getReaderModeContent(options = {}) {
+    const force = !!options.force;
+
     const window = this.browsingContext?.window;
     const document = window?.document;
 
     if (!force && (!document || !lazy.isProbablyReaderable(document))) {
-      return EMPTY_EXTRACTION_RESULT;
+      return null;
     }
 
     if (!document) {
-      return EMPTY_EXTRACTION_RESULT;
+      return null;
     }
 
     const article = await lazy.ReaderMode.parseDocument(document);
     if (!article) {
-      return EMPTY_EXTRACTION_RESULT;
+      return null;
     }
 
-    let text = (article?.textContent || "")
-      .trim()
-      // Replace duplicate whitespace with either a single newline or space
-      .replace(/(\s*\n\s*)|\s{2,}/g, (_, newline) => (newline ? "\n" : " "));
+    let text = (article.textContent || "").trim();
+    if (!options.normalizeWhitespace) {
+      // Replace duplicate whitespace with either a single newline or space.
+      // Skipped when normalizeWhitespace is set, since #postProcessText will
+      // collapse all whitespace anyway.
+      text = text.replace(/(\s*\n\s*)|\s{2,}/g, (_, nl) => (nl ? "\n" : " "));
+    }
 
     if (article.title) {
       text = article.title + "\n\n" + text;
     }
+
+    text = PageExtractorChild.#postProcessText(text, options);
+
     lazy.console.log("GetReaderModeContent", { force });
     lazy.console.debug(text);
 
@@ -134,7 +161,7 @@ export class PageExtractorChild extends JSWindowActorChild {
   /**
    * @see PageExtractorParent#getText for docs
    *
-   * @param {GetTextOptions} options
+   * @param {Partial<GetTextOptions>} options
    * @returns {Promise<ExtractionResult>}
    */
   async getText(options = {}) {
@@ -142,7 +169,7 @@ export class PageExtractorChild extends JSWindowActorChild {
     const document = window?.document;
 
     if (!document) {
-      return EMPTY_EXTRACTION_RESULT;
+      return { text: "", links: [], canvasSnapshots: [] };
     }
 
     const { text, links, canvases } = lazy.extractTextFromDOM(
@@ -155,10 +182,12 @@ export class PageExtractorChild extends JSWindowActorChild {
       canvasSnapshots = await this.#captureCanvases(canvases, options);
     }
 
-    lazy.console.log("GetText", options);
-    lazy.console.debug({ text, links, canvasSnapshots });
+    const processedText = PageExtractorChild.#postProcessText(text, options);
 
-    return { text, links, canvasSnapshots };
+    lazy.console.log("GetText", options);
+    lazy.console.debug({ text: processedText, links, canvasSnapshots });
+
+    return { text: processedText, links, canvasSnapshots };
   }
 
   /**
@@ -167,30 +196,34 @@ export class PageExtractorChild extends JSWindowActorChild {
    * than cache an additional copy of the article, just extract the text from the
    * actual reader mode DOM.
    *
-   * @returns {string | null}
+   * @param {Partial<GetTextOptions>} options
+   * @returns {ExtractionResult | null}
    */
-  getAboutReaderContent() {
+  getAboutReaderContent(options = {}) {
     lazy.console.log("Using special text extraction strategy for about:reader");
-    const document = this.manager.contentWindow.document;
+    const document = this.document;
 
     if (!document) {
       return null;
     }
-    /** @type {HTMLElement?} */
-    const titleEl = document.querySelector(".reader-title");
-    /** @type {HTMLElement?} */
+
+    /** @type {HTMLElement} */
     const contentEl = document.querySelector(".moz-reader-content");
 
-    const title = titleEl?.innerText;
-    const content = contentEl?.innerText;
+    if (!contentEl) {
+      return null;
+    }
+    const title = document.querySelector(".reader-title")?.innerText ?? "";
+    const content = contentEl.innerText;
+
     if (!title && !content) {
       return null;
     }
 
-    if (title) {
-      return `${title}\n\n${content}`.trim();
-    }
-    return content.trim();
+    const raw = title ? `${title}\n\n${content}`.trim() : content.trim();
+    const text = PageExtractorChild.#postProcessText(raw, options);
+
+    return { text, links: [], canvasSnapshots: [] };
   }
 
   /**

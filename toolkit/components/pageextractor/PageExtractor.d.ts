@@ -9,6 +9,10 @@ export type GetTextOptions = Partial<{
   sufficientLength: number;
   // Just include the viewport content.
   justViewport: boolean;
+  // Collapse all whitespace sequences to a single space.
+  normalizeWhitespace: boolean;
+  // Truncate text to this many UTF-16 code units.
+  maxLength: number;
   // Skip canvases smaller than this dimension
   minCanvasSize: number;
   // Max canvases to collect

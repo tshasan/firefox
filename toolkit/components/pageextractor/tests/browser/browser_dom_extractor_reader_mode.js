@@ -39,7 +39,9 @@ add_task(async function test_dom_extractor_reader_mode() {
   );
 
   is(
-    normalizeWhitespace((await getPageExtractor().getReaderModeContent()).text),
+    normalizeWhitespace(
+      (await getPageExtractor().getReaderModeContent({ force: true })).text
+    ),
     text,
     "Normal page content supports getReaderModeContent"
   );
@@ -53,7 +55,9 @@ add_task(async function test_dom_extractor_reader_mode() {
   );
 
   is(
-    normalizeWhitespace((await getPageExtractor().getReaderModeContent()).text),
+    normalizeWhitespace(
+      (await getPageExtractor().getReaderModeContent({ force: true })).text
+    ),
     text,
     "about:reader is supported with getReaderModeContent"
   );

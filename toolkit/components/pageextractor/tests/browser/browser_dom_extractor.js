@@ -23,15 +23,15 @@ add_task(async function test_dom_extractor_default_options() {
   );
 
   is(
-    (await actor.getReaderModeContent(true /* force */)).text,
+    (await actor.getReaderModeContent({ force: true })).text,
     "Hello World\nThis is a paragraph",
     "Reader mode can extract page content."
   );
 
-  Assert.deepEqual(
+  Assert.equal(
     await actor.getReaderModeContent(),
-    { text: "", links: [], canvasSnapshots: [] },
-    "Empty result is returned on non-reader mode content."
+    null,
+    "null is returned on non-reader mode content."
   );
   return cleanup();
 });
@@ -906,6 +906,171 @@ add_task(async function test_canvas_snapshot_with_text_extraction() {
   ok(text.includes("Some text content"), "Paragraph text extracted");
   Assert.deepEqual(links, [], "No links on page");
   is(canvasSnapshots.length, 1, "Canvas captured alongside text");
+
+  return cleanup();
+});
+
+add_task(async function test_normalize_whitespace_option() {
+  const { actor, cleanup } = await html`
+    <article>
+      <h1>Title</h1>
+      <p>First paragraph.</p>
+      <p>Second paragraph.</p>
+    </article>
+  `;
+
+  const normal = await actor.getText();
+  ok(normal.text.includes("\n"), "Without option, text contains newlines");
+
+  const normalized = await actor.getText({ normalizeWhitespace: true });
+  ok(
+    !normalized.text.includes("\n"),
+    "With normalizeWhitespace, newlines are collapsed"
+  );
+  is(
+    normalized.text,
+    "Title First paragraph. Second paragraph.",
+    "Whitespace is collapsed to single spaces"
+  );
+
+  return cleanup();
+});
+
+add_task(async function test_max_length_option() {
+  const { actor, cleanup } = await html`
+    <article>
+      <p>First sentence. Second sentence. Third sentence. Fourth sentence.</p>
+    </article>
+  `;
+
+  const full = await actor.getText();
+  const fullLength = full.text.length;
+
+  const truncated = await actor.getText({ maxLength: 30 });
+  Assert.greater(
+    truncated.text.length,
+    0,
+    "Truncated text should not be empty"
+  );
+  Assert.lessOrEqual(
+    truncated.text.length,
+    30,
+    "Text is truncated to at most maxLength characters"
+  );
+  Assert.less(
+    truncated.text.length,
+    fullLength,
+    "Truncated text is shorter than full text"
+  );
+
+  return cleanup();
+});
+
+add_task(async function test_max_length_truncates_long_text() {
+  const { actor, cleanup } = await html`
+    <article>
+      <p>
+        This is the first sentence that ends here at a reasonable spot to stop.
+        Then we continue with more text that goes on and on without any more
+        periods until we hit the limit and then some additional padding text
+      </p>
+    </article>
+  `;
+
+  const result = await actor.getText({
+    normalizeWhitespace: true,
+    maxLength: 150,
+  });
+  Assert.lessOrEqual(
+    result.text.length,
+    150,
+    "Truncated text is within maxLength"
+  );
+  Assert.greater(result.text.length, 0, "Truncated text is not empty");
+
+  return cleanup();
+});
+
+add_task(async function test_max_length_hard_truncation() {
+  const { actor, cleanup } = await html`
+    <article>
+      <p>
+        This text has no periods and is quite long to test truncation behavior
+      </p>
+    </article>
+  `;
+
+  const result = await actor.getText({
+    normalizeWhitespace: true,
+    maxLength: 50,
+  });
+
+  Assert.equal(
+    result.text.length,
+    50,
+    "Text is truncated to exactly maxLength characters"
+  );
+
+  return cleanup();
+});
+
+add_task(async function test_max_length_zero_returns_empty_string() {
+  const { actor, cleanup } = await html`
+    <article>
+      <p>Some text content here.</p>
+    </article>
+  `;
+
+  const result = await actor.getText({ maxLength: 0 });
+  is(result.text, "", "maxLength: 0 should return an empty string, not '...'");
+
+  return cleanup();
+});
+
+add_task(async function test_max_length_stops_extraction_early() {
+  const { actor, cleanup } = await html`
+    <article>
+      <div>AAAAAAAAAAAAAAAAAAAA</div>
+      <div>BBBBBBBBBBBBBBBBBBBB</div>
+      <div>CCCCCCCCCCCCCCCCCCCC</div>
+      <div><a href="https://example.com/late-link">Late link</a></div>
+    </article>
+  `;
+
+  const full = await actor.getText();
+  Assert.ok(
+    full.links.includes("https://example.com/late-link"),
+    "Without maxLength, the late link is collected"
+  );
+
+  const truncated = await actor.getText({ maxLength: 50 });
+  Assert.deepEqual(
+    truncated.links,
+    [],
+    "With maxLength, extraction stops before reaching the late link block"
+  );
+  Assert.lessOrEqual(
+    truncated.text.length,
+    50,
+    "Text is truncated to maxLength"
+  );
+
+  return cleanup();
+});
+
+add_task(async function test_max_length_zero_with_period_at_start() {
+  const { actor, cleanup } = await html`
+    <article>
+      <p>.Rest of the text goes here</p>
+    </article>
+  `;
+
+  const result = await actor.getText({ maxLength: 0 });
+  is(
+    result.text,
+    "",
+    "maxLength: 0 should return empty string even if text starts with a period"
+  );
 
   return cleanup();
 });

@@ -93,7 +93,7 @@ add_task(async function test_headless_extraction_about_blank() {
 /**
  * Test page extraction on a file URL.
  */
-add_task(async function test_headless_extraction_about_blank() {
+add_task(async function test_headless_extraction_file_url() {
   const { PageExtractorParent } = ChromeUtils.importESModule(
     "resource://gre/actors/PageExtractorParent.sys.mjs"
   );
