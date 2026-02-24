@@ -481,6 +481,7 @@ let JSWINDOWACTORS = {
       "moz-extension://*",
       "data:text/html,*",
       "about:reader?*",
+      "view-source:*",
     ],
     messageManagerGroups: ["browsers", "headless-browsers"],
   },

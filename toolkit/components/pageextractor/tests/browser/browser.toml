@@ -16,6 +16,8 @@ skip-if = [
   "os == 'mac' && os_version == '15.30' && arch == 'aarch64' && opt", # Bug 1996139
 ]
 
+["browser_dom_extractor_view_source.js"]
+
 ["browser_headless_extractor.js"]
 skip-if = [
   "os == 'mac' && os_version == '15.30' && arch == 'aarch64'", # Bug 2004856

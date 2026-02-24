@@ -51,6 +51,9 @@ export class PageExtractorChild extends JSWindowActorChild {
         if (this.isAboutReader()) {
           return this.getAboutReaderContent(data);
         }
+        if (this.isViewSource()) {
+          return null;
+        }
         return this.getReaderModeContent(data);
       case "PageExtractorParent:GetText":
         if (this.isAboutReader()) {
@@ -61,6 +64,9 @@ export class PageExtractorChild extends JSWindowActorChild {
               canvasSnapshots: [],
             }
           );
+        }
+        if (this.isViewSource()) {
+          return this.getViewSourceContent(data);
         }
         return this.getText(data);
       case "PageExtractorParent:WaitForPageReady":
@@ -236,6 +242,35 @@ export class PageExtractorChild extends JSWindowActorChild {
     // `window.location.href` and should be a cheaper check here.
     let url = this.manager.contentWindow.document.documentURIObject;
     return url.schemeIs("about") && url.pathQueryRef.startsWith("reader?");
+  }
+
+  /**
+   * Checks if the page is a view-source: URL, which requires special handling.
+   *
+   * @returns {boolean}
+   */
+  isViewSource() {
+    return this.manager.contentWindow.document.documentURIObject.schemeIs(
+      "view-source"
+    );
+  }
+
+  /**
+   * Extract the raw source text from a view-source: page. The source is
+   * rendered into a #viewsource element; line numbers are CSS pseudo-elements
+   * and are not included in textContent. Uses textContent over innerText to
+   * avoid forcing a layout reflow.
+   *
+   * @param {Partial<GetTextOptions>} options
+   * @returns {ExtractionResult}
+   */
+  getViewSourceContent(options = {}) {
+    const el = this.document.getElementById("viewsource");
+    if (!el) {
+      return { text: "", links: [], canvasSnapshots: [] };
+    }
+    const text = PageExtractorChild.#postProcessText(el.textContent, options);
+    return { text, links: [], canvasSnapshots: [] };
   }
 
   /**
