@@ -24,7 +24,7 @@ function createFakeBrowser(url, hasBrowsingContext = true) {
       currentWindowContext: {
         getActor: sinon.stub().resolves({
           getText: sinon.stub().resolves({ text: "Sample page content" }),
-          getReaderModeContent: sinon.stub().resolves({ text: "" }),
+          getReaderModeContent: sinon.stub().resolves(null),
         }),
       },
     };
@@ -253,7 +253,7 @@ add_task(async function test_getPageContent_successful_extraction() {
 
     const mockExtractor = {
       getText: sinon.stub().resolves({ text: pageContent }),
-      getReaderModeContent: sinon.stub().resolves({ text: "" }),
+      getReaderModeContent: sinon.stub().resolves(null),
     };
 
     const tab = createFakeTab(targetUrl, "Article");
@@ -279,7 +279,7 @@ add_task(async function test_getPageContent_successful_extraction() {
   }
 });
 
-add_task(async function test_getPageContent_content_truncation() {
+add_task(async function test_getPageContent_passes_extraction_options() {
   const sb = sinon.createSandbox();
 
   try {
@@ -288,7 +288,7 @@ add_task(async function test_getPageContent_content_truncation() {
 
     const mockExtractor = {
       getText: sinon.stub().resolves({ text: longContent }),
-      getReaderModeContent: sinon.stub().resolves({ text: "" }),
+      getReaderModeContent: sinon.stub().resolves(null),
     };
 
     const tab = createFakeTab(targetUrl, "Long Page");
@@ -298,24 +298,21 @@ add_task(async function test_getPageContent_content_truncation() {
 
     setupBrowserWindowTracker(sb, createFakeWindow([tab]));
 
-    const result_array = await GetPageContent.getPageContent(
+    await GetPageContent.getPageContent(
       { url_list: [targetUrl] },
       new Set([targetUrl])
     );
-    const result = result_array[0];
 
-    const contentMatch = result.match(/Content \(full page\) from.*:\s*(.*)/s);
-    Assert.ok(contentMatch, "Should match content pattern");
-
-    const extractedContent = contentMatch[1].trim();
-    Assert.lessOrEqual(
-      extractedContent.length,
-      10003,
-      "Content should be truncated to ~10000 chars (with ...)"
-    );
+    // Verify that normalizeWhitespace and maxLength options are passed to the extractor
+    const callArgs = mockExtractor.getText.firstCall.args[0];
     Assert.ok(
-      extractedContent.endsWith("..."),
-      "Truncated content should end with ..."
+      callArgs.normalizeWhitespace,
+      "Should pass normalizeWhitespace option to extractor"
+    );
+    Assert.equal(
+      callArgs.maxLength,
+      GetPageContent.MAX_CHARACTERS,
+      "Should pass maxLength option to extractor"
     );
   } finally {
     sb.restore();
@@ -328,9 +325,11 @@ add_task(async function test_getPageContent_empty_content() {
   try {
     const targetUrl = "https://example.com/empty";
 
+    // Simulate what a real extractor returns for whitespace-only content
+    // after normalizeWhitespace collapses it to empty.
     const mockExtractor = {
-      getText: sinon.stub().resolves({ text: "   \n  \n   " }),
-      getReaderModeContent: sinon.stub().resolves({ text: "" }),
+      getText: sinon.stub().resolves({ text: "" }),
+      getReaderModeContent: sinon.stub().resolves(null),
     };
 
     const tab = createFakeTab(targetUrl, "Empty Page");
@@ -347,17 +346,11 @@ add_task(async function test_getPageContent_empty_content() {
 
     const result = result_array[0];
 
-    // Whitespace content is normalized but still returns success
     Assert.ok(
-      result.includes("Content (full page)"),
-      "Should use full page mode after reader fallback"
+      result.includes("returned no content"),
+      "Should return no content message for empty page"
     );
     Assert.ok(result.includes("Empty Page"), "Should include tab label");
-    // The content is essentially empty after normalization, but still returned
-    Assert.ok(
-      result.match(/:\s*$/),
-      "Content should be mostly empty after normalization"
-    );
   } finally {
     sb.restore();
   }
@@ -371,7 +364,7 @@ add_task(async function test_getPageContent_extraction_error() {
 
     const mockExtractor = {
       getText: sinon.stub().rejects(new Error("Extraction failed")),
-      getReaderModeContent: sinon.stub().resolves({ text: "" }),
+      getReaderModeContent: sinon.stub().resolves(null),
     };
 
     const tab = createFakeTab(targetUrl, "Error Page");

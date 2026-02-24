@@ -449,45 +449,34 @@ export class RunSearch {
       return "Error: could not access search results page content.";
     }
 
+    const MAX_CHARS = 15000;
+    const extractionOptions = {
+      normalizeWhitespace: true,
+      maxLength: MAX_CHARS,
+    };
+
     const pageExtractor = await windowContext.getActor("PageExtractor");
     let extraction;
     try {
-      extraction = await pageExtractor.getReaderModeContent();
+      extraction = await pageExtractor.getReaderModeContent(extractionOptions);
     } catch {
       // Fall back to full text extraction
     }
 
-    let text = extraction?.text ?? "";
-    if (!text) {
+    if (!extraction) {
       try {
-        extraction = await pageExtractor.getText();
-        text = extraction?.text ?? "";
+        extraction = await pageExtractor.getText(extractionOptions);
       } catch {
         return "Error: failed to extract search results content.";
       }
     }
 
-    if (!text) {
+    if (!extraction?.text) {
       return "No content could be extracted from the search results page.";
     }
 
-    let cleanContent = text
-      .replace(/\s+/g, " ")
-      .replace(/\n\s*\n/g, "\n")
-      .trim();
-
-    const MAX_CHARS = 15000;
-    if (cleanContent.length > MAX_CHARS) {
-      const truncatePoint = cleanContent.lastIndexOf(".", MAX_CHARS);
-      if (truncatePoint > MAX_CHARS - 100) {
-        cleanContent = cleanContent.substring(0, truncatePoint + 1);
-      } else {
-        cleanContent = cleanContent.substring(0, MAX_CHARS) + "...";
-      }
-    }
-
     const url = browser.currentURI?.spec || "unknown";
-    return `Search results from ${url}:\n\n${cleanContent}`;
+    return `Search results from ${url}:\n\n${extraction.text}`;
   }
 }
 
@@ -499,14 +488,13 @@ export class GetPageContent {
   static FALLBACK_MODE = "full";
   static MAX_CHARACTERS = 10000;
 
-  /**
-   * @type {Record<string, (pageExtractor: PageExtractor) => Promise<{ text: string }>>}
-   */
+  /** @type {Record<string, (pageExtractor: object, options: object) => Promise<{ text: string } | null>>} */
   static MODE_HANDLERS = {
-    viewport: async pageExtractor =>
-      pageExtractor.getText({ justViewport: true }),
-    reader: async pageExtractor => pageExtractor.getReaderModeContent(),
-    full: async pageExtractor => pageExtractor.getText(),
+    viewport: async (pageExtractor, options) =>
+      pageExtractor.getText({ justViewport: true, ...options }),
+    reader: async (pageExtractor, options) =>
+      pageExtractor.getReaderModeContent(options),
+    full: async (pageExtractor, options) => pageExtractor.getText(options),
   };
 
   /**
@@ -665,8 +653,13 @@ export class GetPageContent {
     const handler = GetPageContent.MODE_HANDLERS[selectedMode];
     let extraction = null;
 
+    const extractionOptions = {
+      normalizeWhitespace: true,
+      maxLength: GetPageContent.MAX_CHARACTERS,
+    };
+
     try {
-      extraction = await handler(pageExtractor);
+      extraction = await handler(pageExtractor, extractionOptions);
     } catch (err) {
       console.error(
         "[SmartWindow] get_page_content mode failed",
@@ -675,19 +668,16 @@ export class GetPageContent {
       );
     }
 
-    let pageContent = extraction?.text ?? "";
-
     // Track which mode was actually used (in case we fall back)
     let actualMode = selectedMode;
 
     // If reader mode returns no content, fall back to full mode
-    if (!pageContent && selectedMode === "reader") {
+    if (!extraction && selectedMode === "reader") {
       try {
         const fallbackHandler =
           GetPageContent.MODE_HANDLERS[GetPageContent.FALLBACK_MODE];
-        extraction = await fallbackHandler(pageExtractor);
-        pageContent = extraction?.text ?? "";
-        if (pageContent) {
+        extraction = await fallbackHandler(pageExtractor, extractionOptions);
+        if (extraction) {
           actualMode = GetPageContent.FALLBACK_MODE;
         }
       } catch (err) {
@@ -699,33 +689,8 @@ export class GetPageContent {
       }
     }
 
-    if (!pageContent) {
+    if (!extraction?.text) {
       return `get_page_content(${selectedMode}) returned no content for ${label}.`;
-      // Stripped message "Try another mode if you still need information." to not confuse the LLM
-    }
-
-    // Clean and truncate content for better LLM consumption
-    //  Bug 2006436 - Consider doing this directly in pageExtractor if absolutely needed.
-    let cleanContent = pageContent
-      .replace(/\s+/g, " ") // Normalize whitespace
-      .replace(/\n\s*\n/g, "\n") // Clean up line breaks
-      .trim();
-
-    // Limit content length but be more generous for LLM processing
-    // Bug 1995043 - once reader mode has length truncation,
-    // we can remove this and directly do this in pageExtractor.
-    if (cleanContent.length > GetPageContent.MAX_CHARACTERS) {
-      // Try to cut at a sentence boundary
-      const truncatePoint = cleanContent.lastIndexOf(
-        ".",
-        GetPageContent.MAX_CHARACTERS
-      );
-      if (truncatePoint > GetPageContent.MAX_CHARACTERS - 100) {
-        cleanContent = cleanContent.substring(0, truncatePoint + 1);
-      } else {
-        cleanContent =
-          cleanContent.substring(0, GetPageContent.MAX_CHARACTERS) + "...";
-      }
     }
 
     const modeLabel = {
@@ -734,7 +699,7 @@ export class GetPageContent {
       full: "full page",
     }[actualMode];
 
-    return `Content (${modeLabel}) from ${label}:\n\n${cleanContent}`;
+    return `Content (${modeLabel}) from ${label}:\n\n${extraction.text}`;
   }
 }
 
