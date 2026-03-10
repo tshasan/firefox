@@ -113,7 +113,7 @@ export class PageExtractorChild extends JSWindowActorChild {
       result = result.replace(/\s+/g, " ").trim();
     }
     const { maxLength } = options;
-    if (maxLength !== undefined && result.length > maxLength) {
+    if (maxLength !== undefined && result.length >= maxLength) {
       return result.substring(0, Math.max(0, maxLength));
     }
     return result;

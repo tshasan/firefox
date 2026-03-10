@@ -24,6 +24,7 @@ MOZ_SRC_FILES += [
     "SearchBrowsingHistoryDomainBoost.sys.mjs",
     "TitleGeneration.sys.mjs",
     "Tools.sys.mjs",
+    "ToolSanitizers.sys.mjs",
     "Utils.sys.mjs",
 ]
 

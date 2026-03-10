@@ -12,6 +12,7 @@ import {
   MODEL_FEATURES,
 } from "moz-src:///browser/components/aiwindow/models/Utils.sys.mjs";
 
+
 import { MESSAGE_ROLE } from "moz-src:///browser/components/aiwindow/ui/modules/ChatStore.sys.mjs";
 
 import { MemoriesManager } from "moz-src:///browser/components/aiwindow/models/memories/MemoriesManager.sys.mjs";
@@ -176,7 +177,10 @@ export async function generateConversationStartersSidebar(
 
     // Format current tab (first in context or empty)
     const currentTab = contextTabs.length
-      ? formatJson({ title: contextTabs[0].title, url: contextTabs[0].url })
+      ? formatJson({
+          title: contextTabs[0].title,
+          url: contextTabs[0].url,
+        })
       : "No current tab";
 
     // Format opened tabs
@@ -186,7 +190,9 @@ export async function generateConversationStartersSidebar(
         contextTabs.length === 1
           ? "Only current tab is open"
           : formatJson(
-              contextTabs.slice(1).map(t => ({ title: t.title, url: t.url }))
+              contextTabs
+                .slice(1)
+                .map(t => ({ title: t.title, url: t.url }))
             );
     } else {
       openedTabs = "No tabs available";
@@ -274,7 +280,10 @@ export async function generateFollowupPrompts(
     const convo = trimConversation(conversationHistory);
     const currentTabStr =
       currentTab && Object.keys(currentTab).length
-        ? formatJson({ title: currentTab.title, url: currentTab.url })
+        ? formatJson({
+            title: currentTab.title,
+            url: currentTab.url,
+          })
         : "No tab";
 
     // Build engine and load prompt

@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-const { GetPageContent } = ChromeUtils.importESModule(
+const { GetPageContent, runExtraction } = ChromeUtils.importESModule(
   "moz-src:///browser/components/aiwindow/models/Tools.sys.mjs"
 );
 
@@ -303,7 +303,6 @@ add_task(async function test_getPageContent_passes_extraction_options() {
       new Set([targetUrl])
     );
 
-    // Verify that normalizeWhitespace and maxLength options are passed to the extractor
     const callArgs = mockExtractor.getText.firstCall.args[0];
     Assert.ok(
       callArgs.normalizeWhitespace,
@@ -313,6 +312,11 @@ add_task(async function test_getPageContent_passes_extraction_options() {
       callArgs.maxLength,
       GetPageContent.MAX_CHARACTERS,
       "Should pass maxLength option to extractor"
+    );
+    Assert.equal(
+      callArgs.sufficientLength,
+      GetPageContent.MAX_CHARACTERS,
+      "Should pass sufficientLength for early-stop optimization"
     );
   } finally {
     sb.restore();
@@ -526,3 +530,248 @@ add_task(
     }
   }
 );
+
+add_task(async function test_getPageContent_does_not_mutate_security_flags() {
+  const sb = sinon.createSandbox();
+
+  try {
+    const targetUrl = "https://example.com/page";
+    const tabs = [createFakeTab(targetUrl, "Example Page")];
+    setupBrowserWindowTracker(sb, createFakeWindow(tabs));
+
+    const secProps = { untrusted_input: false, private_data: false };
+    await GetPageContent.getPageContent(
+      { url_list: [targetUrl] },
+      new Set([targetUrl]),
+      secProps
+    );
+
+    Assert.strictEqual(
+      secProps.untrusted_input,
+      false,
+      "getPageContent should not mutate untrusted_input"
+    );
+    Assert.strictEqual(
+      secProps.private_data,
+      false,
+      "getPageContent should not mutate private_data"
+    );
+  } finally {
+    sb.restore();
+  }
+});
+
+add_task(async function test_getPageContent_includes_links_in_output() {
+  const sb = sinon.createSandbox();
+
+  try {
+    const targetUrl = "https://example.com/links";
+    const pageLinks = [
+      "https://example.com/about",
+      "https://example.com/contact",
+    ];
+
+    const mockExtractor = {
+      getText: sinon.stub().resolves({ text: "Page text", links: pageLinks }),
+      getReaderModeContent: sinon.stub().resolves(null),
+    };
+
+    const tab = createFakeTab(targetUrl, "Links Page");
+    tab.linkedBrowser.browsingContext.currentWindowContext.getActor = sinon
+      .stub()
+      .resolves(mockExtractor);
+
+    setupBrowserWindowTracker(sb, createFakeWindow([tab]));
+
+    const result_array = await GetPageContent.getPageContent(
+      { url_list: [targetUrl] },
+      new Set([targetUrl])
+    );
+    const result = result_array[0];
+
+    Assert.ok(
+      result.includes("Links found on page"),
+      "Should have links section"
+    );
+    Assert.ok(
+      result.includes("https://example.com/about"),
+      "Should include first link"
+    );
+    Assert.ok(
+      result.includes("https://example.com/contact"),
+      "Should include second link"
+    );
+  } finally {
+    sb.restore();
+  }
+});
+
+add_task(async function test_getPageContent_tab_index_efficiency() {
+  const sb = sinon.createSandbox();
+
+  try {
+    const url1 = "https://example.com/page1";
+    const url2 = "https://other.com/page2";
+
+    const mockExtractor1 = {
+      getText: sinon.stub().resolves({ text: "Content 1" }),
+      getReaderModeContent: sinon.stub().resolves(null),
+    };
+    const mockExtractor2 = {
+      getText: sinon.stub().resolves({ text: "Content 2" }),
+      getReaderModeContent: sinon.stub().resolves(null),
+    };
+
+    const tab1 = createFakeTab(url1, "Page 1");
+    tab1.linkedBrowser.browsingContext.currentWindowContext.getActor = sinon
+      .stub()
+      .resolves(mockExtractor1);
+    const tab2 = createFakeTab(url2, "Page 2");
+    tab2.linkedBrowser.browsingContext.currentWindowContext.getActor = sinon
+      .stub()
+      .resolves(mockExtractor2);
+
+    setupBrowserWindowTracker(sb, createFakeWindow([tab1, tab2]));
+
+    const results = await GetPageContent.getPageContent(
+      { url_list: [url1, url2] },
+      new Set([url1, url2])
+    );
+
+    Assert.equal(results.length, 2, "Should return results for both URLs");
+    Assert.ok(results[0].includes("Content 1"), "First result matches");
+    Assert.ok(results[1].includes("Content 2"), "Second result matches");
+  } finally {
+    sb.restore();
+  }
+});
+
+add_task(async function test_runExtraction_sufficientLength_is_passed() {
+  const maxLen = 5000;
+  const mockExtractor = {
+    getText: sinon.stub().resolves({ text: "content" }),
+    getReaderModeContent: sinon.stub().resolves(null),
+  };
+
+  await runExtraction(mockExtractor, {
+    mode: "full",
+    label: "test",
+    maxLength: maxLen,
+  });
+
+  const opts = mockExtractor.getText.firstCall.args[0];
+  Assert.equal(opts.maxLength, maxLen, "maxLength forwarded");
+  Assert.equal(
+    opts.sufficientLength,
+    maxLen,
+    "sufficientLength set equal to maxLength for early-stop"
+  );
+  Assert.ok(opts.normalizeWhitespace, "normalizeWhitespace enabled");
+});
+
+add_task(async function test_runExtraction_reader_fallback_to_full() {
+  const mockExtractor = {
+    getReaderModeContent: sinon.stub().resolves(null),
+    getText: sinon.stub().resolves({ text: "full page fallback" }),
+  };
+
+  const result = await runExtraction(mockExtractor, {
+    mode: "reader",
+    label: "fallback test",
+  });
+
+  Assert.ok(
+    mockExtractor.getReaderModeContent.calledOnce,
+    "Tried reader mode first"
+  );
+  Assert.ok(mockExtractor.getText.calledOnce, "Fell back to full mode");
+  Assert.ok(result.includes("full page"), "Mode label indicates full page");
+  Assert.ok(result.includes("full page fallback"), "Content from getText");
+});
+
+add_task(async function test_runExtraction_includes_links() {
+  const links = ["https://a.com", "https://b.com"];
+  const mockExtractor = {
+    getReaderModeContent: sinon.stub().resolves(null),
+    getText: sinon.stub().resolves({ text: "body text", links }),
+  };
+
+  const result = await runExtraction(mockExtractor, {
+    mode: "full",
+    label: "link test",
+  });
+
+  Assert.ok(result.includes("Links found on page"), "Links section present");
+  Assert.ok(result.includes("https://a.com"), "First link included");
+  Assert.ok(result.includes("https://b.com"), "Second link included");
+});
+
+add_task(async function test_runExtraction_no_links_section_when_empty() {
+  const mockExtractor = {
+    getReaderModeContent: sinon.stub().resolves(null),
+    getText: sinon.stub().resolves({ text: "body text", links: [] }),
+  };
+
+  const result = await runExtraction(mockExtractor, {
+    mode: "full",
+    label: "no links",
+  });
+
+  Assert.ok(
+    !result.includes("Links found on page"),
+    "No links section when links array is empty"
+  );
+});
+
+add_task(async function test_runExtraction_no_content() {
+  const mockExtractor = {
+    getReaderModeContent: sinon.stub().resolves(null),
+    getText: sinon.stub().resolves({ text: "" }),
+  };
+
+  const result = await runExtraction(mockExtractor, {
+    mode: "reader",
+    label: "empty label",
+  });
+
+  Assert.ok(
+    result.includes("returned no content"),
+    "Returns no-content message"
+  );
+  Assert.ok(result.includes("empty label"), "Label included in message");
+});
+
+add_task(async function test_runExtraction_viewport_mode() {
+  const mockExtractor = {
+    getText: sinon.stub().resolves({ text: "viewport text" }),
+  };
+
+  const result = await runExtraction(mockExtractor, {
+    mode: "viewport",
+    label: "vp test",
+  });
+
+  Assert.ok(result.includes("current viewport"), "Mode label is viewport");
+  Assert.ok(result.includes("viewport text"), "Content from viewport");
+
+  const opts = mockExtractor.getText.firstCall.args[0];
+  Assert.ok(opts.justViewport, "justViewport flag set for viewport mode");
+});
+
+add_task(async function test_runExtraction_invalid_mode_defaults_to_reader() {
+  const mockExtractor = {
+    getReaderModeContent: sinon.stub().resolves({ text: "reader content" }),
+    getText: sinon.stub(),
+  };
+
+  const result = await runExtraction(mockExtractor, {
+    mode: "bogus_mode",
+    label: "test",
+  });
+
+  Assert.ok(
+    mockExtractor.getReaderModeContent.calledOnce,
+    "Invalid mode falls back to reader"
+  );
+  Assert.ok(result.includes("reader mode"), "Mode label is reader");
+});

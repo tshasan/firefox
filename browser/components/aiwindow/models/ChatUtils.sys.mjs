@@ -4,6 +4,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
+import { truncateTitle } from "moz-src:///browser/components/aiwindow/models/ToolSanitizers.sys.mjs";
+
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
@@ -53,7 +55,9 @@ export async function getCurrentTabMetadata(depsOverride) {
   }
 
   const url = browser.currentURI?.spec || "";
-  const title = browser.contentTitle || browser.documentTitle || "";
+  const title = truncateTitle(
+    browser.contentTitle || browser.documentTitle || ""
+  );
 
   let description = "";
   /**
@@ -61,7 +65,7 @@ export async function getCurrentTabMetadata(depsOverride) {
    * Need to extract page description in PageExtractor
    */
 
-  return { url, title, description };
+  return { url, title, description: truncateTitle(description) };
 }
 
 /**

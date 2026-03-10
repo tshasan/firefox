@@ -43,6 +43,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "moz-src:///browser/components/aiwindow/models/ConversationSuggestions.sys.mjs",
   MemoriesManager:
     "moz-src:///browser/components/aiwindow/models/memories/MemoriesManager.sys.mjs",
+  truncateTitle:
+    "moz-src:///browser/components/aiwindow/models/ToolSanitizers.sys.mjs",
 });
 
 ChromeUtils.defineLazyGetter(lazy, "log", function () {
@@ -518,7 +520,7 @@ export class AIWindow extends MozLitElement {
         // Get tab context for LLM-generated prompts
         // @todo bug 2015919 to use same context as visualized in smartbar
         const contextTabs = [gBrowser.selectedTab].map(tab => ({
-          title: tab.label,
+          title: lazy.truncateTitle(tab.label),
           url: tab.linkedBrowser.currentURI.spec,
         }));
 

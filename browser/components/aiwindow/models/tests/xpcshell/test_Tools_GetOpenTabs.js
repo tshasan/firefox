@@ -105,7 +105,7 @@ add_task(async function test_getOpenTabs_basic() {
   }
 });
 
-add_task(async function test_getOpenTabs_filters_about_urls() {
+add_task(async function test_getOpenTabs_filters_non_web_urls() {
   const BrowserWindowTracker = ChromeUtils.importESModule(
     "resource:///modules/BrowserWindowTracker.sys.mjs"
   ).BrowserWindowTracker;
@@ -119,6 +119,10 @@ add_task(async function test_getOpenTabs_filters_about_urls() {
       createFakeTab("about:config", "Config", 3000),
       createFakeTab("https://mozilla.org", "Mozilla", 4000),
       createFakeTab("about:blank", "Blank", 5000),
+      createFakeTab("chrome://browser/content/browser.xhtml", "Chrome", 6000),
+      createFakeTab("moz-extension://abc/page.html", "Extension", 7000),
+      createFakeTab("file:///home/user/doc.html", "Local File", 8000),
+      createFakeTab("data:text/html,hello", "Data URL", 9000),
     ]);
 
     sb.stub(BrowserWindowTracker, "orderedWindows").get(() => [fakeWindow]);
@@ -129,7 +133,7 @@ add_task(async function test_getOpenTabs_filters_about_urls() {
     Assert.equal(
       tabs.length,
       2,
-      "Should only return non-about: tabs (filtered 3)"
+      "Should only return http/https tabs (filtered 7)"
     );
     Assert.equal(
       tabs[0].url,
@@ -138,8 +142,10 @@ add_task(async function test_getOpenTabs_filters_about_urls() {
     );
     Assert.equal(tabs[1].url, "https://example.com", "Should return example");
     Assert.ok(
-      !tabs.some(t => t.url.startsWith("about:")),
-      "No about: URLs in results"
+      tabs.every(
+        t => t.url.startsWith("https://") || t.url.startsWith("http://")
+      ),
+      "Only http/https URLs in results"
     );
   } finally {
     sb.restore();
@@ -165,22 +171,13 @@ add_task(async function test_getOpenTabs_pagination() {
     sb.stub(BrowserWindowTracker, "orderedWindows").get(() => [fakeWindow]);
     setupPageDataServiceMock(sb);
 
-    // Test default limit
+    // Test hardcoded limit
     const defaultResult = await getOpenTabs();
-    Assert.equal(defaultResult.length, 15, "Should default to 15 tabs");
+    Assert.equal(defaultResult.length, 15, "Should return 15 tabs");
     Assert.equal(
       defaultResult[0].url,
       "https://example19.com",
       "First tab should be most recent"
-    );
-
-    // Test custom limit
-    const customResult = await getOpenTabs(10);
-    Assert.equal(customResult.length, 10, "Should return at most 10 tabs");
-    Assert.equal(
-      customResult[9].url,
-      "https://example10.com",
-      "Last tab should be 10th most recent"
     );
   } finally {
     sb.restore();
@@ -286,6 +283,102 @@ add_task(async function test_getOpenTabs_return_structure() {
     //   "description should be fetched from PageDataService"
     // );
     Assert.equal(tab.lastAccessed, 1000, "lastAccessed value correct");
+  } finally {
+    sb.restore();
+  }
+});
+
+add_task(async function test_getOpenTabs_truncates_long_titles() {
+  const BrowserWindowTracker = ChromeUtils.importESModule(
+    "resource:///modules/BrowserWindowTracker.sys.mjs"
+  ).BrowserWindowTracker;
+
+  const sb = sinon.createSandbox();
+
+  try {
+    const longTitle = "A".repeat(150);
+    const fakeWindow = createFakeWindow([
+      createFakeTab("https://example.com", longTitle, 2000),
+      createFakeTab("https://mozilla.org", "Short Title", 1000),
+    ]);
+
+    sb.stub(BrowserWindowTracker, "orderedWindows").get(() => [fakeWindow]);
+    setupPageDataServiceMock(sb);
+
+    const tabs = await getOpenTabs();
+
+    Assert.equal(tabs.length, 2, "Should return 2 tabs");
+    Assert.equal(
+      tabs[0].title.length,
+      101,
+      "Long title truncated to 100 chars + ellipsis"
+    );
+    Assert.equal(
+      tabs[0].title,
+      "A".repeat(100) + "\u2026",
+      "100 chars + ellipsis"
+    );
+    Assert.equal(tabs[1].title, "Short Title", "Short title unchanged");
+  } finally {
+    sb.restore();
+  }
+});
+
+add_task(async function test_getOpenTabs_ignores_llm_params() {
+  // Bug 2020796: LLM must not be able to control the tab limit.
+  // getOpenTabs ignores any params passed to it; limit is always MAX_TABS=15.
+  const BrowserWindowTracker = ChromeUtils.importESModule(
+    "resource:///modules/BrowserWindowTracker.sys.mjs"
+  ).BrowserWindowTracker;
+
+  const sb = sinon.createSandbox();
+
+  try {
+    const tabs = [];
+    for (let i = 0; i < 20; i++) {
+      tabs.push(
+        createFakeTab(`https://example${i}.com`, `Example ${i}`, i * 1000)
+      );
+    }
+    const fakeWindow = createFakeWindow(tabs);
+    sb.stub(BrowserWindowTracker, "orderedWindows").get(() => [fakeWindow]);
+    setupPageDataServiceMock(sb);
+
+    // Even if the LLM passes a large n, the result is always capped at 15
+    const result = await getOpenTabs({ n: 9999 });
+    Assert.equal(result.length, 15, "LLM-supplied n param has no effect");
+  } finally {
+    sb.restore();
+  }
+});
+
+add_task(async function test_getOpenTabs_skips_null_url_tabs() {
+  const BrowserWindowTracker = ChromeUtils.importESModule(
+    "resource:///modules/BrowserWindowTracker.sys.mjs"
+  ).BrowserWindowTracker;
+
+  const sb = sinon.createSandbox();
+
+  try {
+    const fakeWindow = createFakeWindow([
+      createFakeTab("https://example.com", "Example", 1000),
+      // Tab with null URL (e.g. a tab still loading)
+      {
+        linkedBrowser: { currentURI: null },
+        label: "Loading",
+        lastAccessed: 2000,
+      },
+      // Tab with undefined currentURI
+      { linkedBrowser: {}, label: "No URI", lastAccessed: 3000 },
+    ]);
+
+    sb.stub(BrowserWindowTracker, "orderedWindows").get(() => [fakeWindow]);
+    setupPageDataServiceMock(sb);
+
+    const tabs = await getOpenTabs();
+
+    Assert.equal(tabs.length, 1, "Tabs with null/missing URL are skipped");
+    Assert.equal(tabs[0].url, "https://example.com", "Valid tab returned");
   } finally {
     sb.restore();
   }

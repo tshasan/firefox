@@ -152,6 +152,8 @@ Object.assign(Chat, {
           const params = hasParams ? toolParams : undefined;
           const secProps = conversation.securityProperties;
 
+          const toolStartTime = ChromeUtils.now();
+
           if (toolName === "run_search") {
             if (!context.browsingContext) {
               console.error(
@@ -162,10 +164,20 @@ Object.assign(Chat, {
             searchHandoffBrowser = context.browsingContext.embedderElement;
             result = await toolFunc(params ?? {}, context, secProps);
           } else if (toolName === "get_page_content") {
-            result = await toolFunc(params, undefined, secProps);
+            result = await toolFunc(params, allAllowedUrls, secProps);
+            // Mark the conversation as containing untrusted + private data
+            // after any page content extraction.
+            secProps.untrusted_input = true;
+            secProps.private_data = true;
           } else {
             result = await toolFunc(params, secProps);
           }
+
+          ChromeUtils.addProfilerMarker(
+            "SmartWindow:ToolCall",
+            { startTime: toolStartTime },
+            toolName
+          );
 
           this._collectAllowedUrlsFromToolCall(
             toolName,

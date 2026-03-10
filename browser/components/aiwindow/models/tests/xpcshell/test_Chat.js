@@ -576,6 +576,8 @@ add_task(
         },
       };
 
+      // The stub no longer mutates security flags; Chat.sys.mjs does
+      // that after the tool call returns.
       const getPageContentStub = sb
         .stub(Chat.toolMap, "get_page_content")
         .callsFake(async (_params, _allowedUrls, secProps = {}) => {
@@ -584,8 +586,6 @@ add_task(
               `get_page_content is not available for ${_params?.url} when the conversation involves both untrusted input and private data.`,
             ];
           }
-          secProps.untrusted_input = true;
-          secProps.private_data = true;
           return ["page content"];
         });
       sb.stub(openAIEngine, "build").resolves(fakeEngine);
@@ -714,3 +714,184 @@ add_task(async function test_Chat_fetchWithHistory_uses_modelId_from_pref() {
     Services.prefs.clearUserPref(PREF_MODEL);
   }
 });
+
+add_task(
+  async function test_Chat_fetchWithHistory_passes_allowedUrls_to_get_page_content() {
+    const sb = sinon.createSandbox();
+    try {
+      let callCount = 0;
+      const fakeEngine = {
+        runWithGenerator(_options) {
+          callCount++;
+          async function* gen() {
+            if (callCount === 1) {
+              yield {
+                toolCalls: [
+                  {
+                    id: "call_gpc",
+                    function: {
+                      name: "get_page_content",
+                      arguments: JSON.stringify({
+                        url_list: ["https://example.com"],
+                      }),
+                    },
+                  },
+                ],
+              };
+            } else {
+              yield { text: "Done." };
+            }
+          }
+          return gen();
+        },
+        getConfig() {
+          return {};
+        },
+      };
+
+      let receivedAllowedUrls = null;
+      const gpcStub = sb
+        .stub(Chat.toolMap, "get_page_content")
+        .callsFake(async (_params, allowedUrls, _secProps) => {
+          receivedAllowedUrls = allowedUrls;
+          return ["extracted content"];
+        });
+
+      sb.stub(openAIEngine, "build").resolves(fakeEngine);
+
+      const conversation = new ChatConversation({
+        title: "allowed urls test",
+        description: "desc",
+        pageUrl: new URL("https://www.firefox.com"),
+        pageMeta: {},
+      });
+      conversation.addUserMessage(
+        "Get page content",
+        "https://www.firefox.com",
+        0
+      );
+
+      const engineInstance = await openAIEngine.build(MODEL_FEATURES.CHAT);
+      let textOutput = "";
+      for await (const chunk of Chat.fetchWithHistory(
+        conversation,
+        engineInstance
+      )) {
+        if (typeof chunk === "string") {
+          textOutput += chunk;
+        }
+      }
+
+      Assert.equal(
+        callCount,
+        2,
+        "Engine should be called twice (tool call + follow-up)"
+      );
+      Assert.ok(textOutput.includes("Done."), "Should yield follow-up text");
+      Assert.ok(gpcStub.calledOnce, "get_page_content stub should be called");
+      Assert.equal(
+        typeof receivedAllowedUrls?.has,
+        "function",
+        "get_page_content should receive a Set-like object for allowedUrls"
+      );
+      Assert.equal(
+        typeof receivedAllowedUrls?.add,
+        "function",
+        "allowedUrls should have Set methods"
+      );
+    } finally {
+      sb.restore();
+    }
+  }
+);
+
+add_task(
+  async function test_Chat_fetchWithHistory_sets_security_flags_after_get_page_content() {
+    const sb = sinon.createSandbox();
+    try {
+      let callCount = 0;
+      const fakeEngine = {
+        runWithGenerator(_options) {
+          callCount++;
+          async function* gen() {
+            if (callCount === 1) {
+              yield {
+                toolCalls: [
+                  {
+                    id: "call_gpc",
+                    function: {
+                      name: "get_page_content",
+                      arguments: JSON.stringify({
+                        url_list: ["https://example.com"],
+                      }),
+                    },
+                  },
+                ],
+              };
+            } else {
+              yield { text: "Done." };
+            }
+          }
+          return gen();
+        },
+        getConfig() {
+          return {};
+        },
+      };
+
+      let flagsDuringCall = null;
+      sb.stub(Chat.toolMap, "get_page_content").callsFake(
+        async (_params, _allowedUrls, secProps) => {
+          // Capture the flags as they are DURING the call
+          flagsDuringCall = {
+            untrusted_input: secProps.untrusted_input,
+            private_data: secProps.private_data,
+          };
+          return ["content"];
+        }
+      );
+
+      sb.stub(openAIEngine, "build").resolves(fakeEngine);
+
+      const conversation = new ChatConversation({
+        title: "flags timing test",
+        description: "desc",
+        pageUrl: new URL("https://www.firefox.com"),
+        pageMeta: {},
+        securityProperties: { untrusted_input: false, private_data: false },
+      });
+      conversation.addUserMessage("Test", "https://www.firefox.com", 0);
+
+      const engineInstance = await openAIEngine.build(MODEL_FEATURES.CHAT);
+      for await (const chunk of Chat.fetchWithHistory(
+        conversation,
+        engineInstance
+      )) {
+        void chunk;
+      }
+
+      Assert.strictEqual(
+        flagsDuringCall.untrusted_input,
+        false,
+        "Flags should be false during the tool call itself"
+      );
+      Assert.strictEqual(
+        flagsDuringCall.private_data,
+        false,
+        "Flags should be false during the tool call itself"
+      );
+      Assert.strictEqual(
+        conversation.securityProperties.untrusted_input,
+        true,
+        "untrusted_input should be true after the tool call completes"
+      );
+      Assert.strictEqual(
+        conversation.securityProperties.private_data,
+        true,
+        "private_data should be true after the tool call completes"
+      );
+    } finally {
+      sb.restore();
+    }
+  }
+);

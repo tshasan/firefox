@@ -42,6 +42,8 @@ support-files = [
 
 ["test_ToolDefinitions.js"]
 
+["test_ToolSanitizers.js"]
+
 ["test_Tools_GetOpenTabs.js"]
 
 ["test_Tools_GetPageContent.js"]

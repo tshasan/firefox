@@ -10,6 +10,10 @@
 
 import { searchBrowsingHistory as implSearchBrowsingHistory } from "moz-src:///browser/components/aiwindow/models/SearchBrowsingHistory.sys.mjs";
 import { PageExtractorParent } from "resource://gre/actors/PageExtractorParent.sys.mjs";
+import {
+  isAllowedUrl,
+  truncateTitle,
+} from "moz-src:///browser/components/aiwindow/models/ToolSanitizers.sys.mjs";
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
@@ -24,6 +28,9 @@ ChromeUtils.defineESModuleGetters(lazy, {
   // PageDataService:
   //   "moz-src:///browser/components/pagedata/PageDataService.sys.mjs",
 });
+
+const MAX_TABS = 15;
+const MAX_HISTORY_RESULTS = 15;
 
 const GET_OPEN_TABS = "get_open_tabs";
 const SEARCH_BROWSING_HISTORY = "search_browsing_history";
@@ -45,9 +52,9 @@ export const toolsConfig = [
     function: {
       name: GET_OPEN_TABS,
       description:
-        "Access the user's browser and return a list of most recently browsed tabs. " +
-        "Each tab is represented by a JSON with the page's url, title and description " +
-        "if available. Default to return maximum 15 tabs.",
+        "Access the user's browser and return a list of the most recently browsed tabs. " +
+        "Each tab is represented by a JSON with the page's url, title, and description " +
+        "if available.",
       parameters: {
         type: "object",
         properties: {},
@@ -148,70 +155,50 @@ export const toolsConfig = [
 ];
 
 /**
- * Retrieves a list of (up to n) the latest open tabs from the current active browser window.
- * Ignores config pages (about:xxx).
+ * Retrieves a list of the latest open tabs from the current active browser window.
+ * Only includes http/https tabs.
  * TODO: Ignores chat-only pages (FE to implement isSidebarMode flag).
  *
- * @param {number} n
- *  Maximum number of tabs to return. Defaults to 15.
+ * @param {object} _params
  * @param {object} _secProps
- * @returns {Promise<Array<object>>}
- *  A promise resolving to an array of tab metadata objects, each containing:
+ * @returns {Array<object>}
+ *  An array of tab metadata objects, each containing:
  *  - url {string}: The tab's current URL
  *  - title {string}: The tab's title
  *  - description {string}: Optional description (empty string if not available)
  *  - lastAccessed {number}: Last accessed timestamp in milliseconds
- *  Tabs are sorted by most recently accessed and limited to the first n results.
+ *  Tabs are sorted by most recently accessed and limited to MAX_TABS results.
  */
-export async function getOpenTabs(n = 15, _secProps) {
+export function getOpenTabs(_params, _secProps) {
   const tabs = [];
 
   for (const win of lazy.BrowserWindowTracker.orderedWindows) {
-    if (!lazy.AIWindow.isAIWindowActive(win)) {
+    if (!lazy.AIWindow.isAIWindowActive(win) || win.closed || !win.gBrowser) {
       continue;
     }
 
-    if (!win.closed && win.gBrowser) {
-      for (const tab of win.gBrowser.tabs) {
-        const browser = tab.linkedBrowser;
-        const url = browser?.currentURI?.spec;
-        const title = tab.label;
+    for (const tab of win.gBrowser.tabs) {
+      const url = tab.linkedBrowser?.currentURI?.spec;
 
-        if (url && !url.startsWith("about:")) {
-          tabs.push({
-            url,
-            title,
-            lastAccessed: tab.lastAccessed,
-          });
-        }
+      if (url && isAllowedUrl(url)) {
+        tabs.push({
+          url,
+          title: truncateTitle(tab.label),
+          lastAccessed: tab.lastAccessed,
+        });
       }
     }
   }
 
   tabs.sort((a, b) => b.lastAccessed - a.lastAccessed);
 
-  const topTabs = tabs.slice(0, n);
-
-  return Promise.all(
-    topTabs.map(async ({ url, title, lastAccessed }) => {
-      let description = "";
-      if (url) {
-        // @todo Bug 2009194
-        // PageDataService halts code execution even in try/catch
-        //
-        // try {
-        //   description =
-        //     lazy.PageDataService.getCached(url)?.description ||
-        //     (await lazy.PageDataService.fetchPageData(url))?.description ||
-        //     "";
-        // } catch (e) {
-        //   console.log(e);
-        //   description = "";
-        // }
-      }
-      return { url, title, description, lastAccessed };
-    })
-  );
+  // @todo Bug 2009194 — description requires PageDataService (currently broken).
+  return tabs.slice(0, MAX_TABS).map(({ url, title, lastAccessed }) => ({
+    url,
+    title,
+    description: "",
+    lastAccessed,
+  }));
 }
 
 /**
@@ -221,7 +208,6 @@ export async function getOpenTabs(n = 15, _secProps) {
  * - searchTerm: ""        - string used for search
  * - startTs: null         - local ISO timestamp lower bound, or null
  * - endTs: null           - local ISO timestamp upper bound, or null
- * - historyLimit: 15      - max number of results
  *
  * Detailed behavior and implementation are in SearchBrowsingHistory.sys.mjs.
  *
@@ -234,8 +220,6 @@ export async function getOpenTabs(n = 15, _secProps) {
  *  Optional local ISO-8601 start timestamp (e.g. "2025-11-07T09:00:00").
  * @param {string|null} toolParams.endTs
  *  Optional local ISO-8601 end timestamp (e.g. "2025-11-07T09:00:00").
- * @param {number} toolParams.historyLimit
- *  Maximum number of history results to return.
  * @param {object} _secProps
  * @returns {Promise<object>}
  *  A promise resolving to an object with the search term and history results.
@@ -243,56 +227,17 @@ export async function getOpenTabs(n = 15, _secProps) {
  *  `error` string on failure.
  */
 export async function searchBrowsingHistory(toolParams, _secProps) {
-  const params = toolParams && typeof toolParams === "object" ? toolParams : {};
+  const params =
+    toolParams && typeof toolParams === "object" ? toolParams : {};
 
-  const {
-    searchTerm = "",
-    startTs = null,
-    endTs = null,
-    historyLimit = 15,
-  } = params;
+  const { searchTerm = "", startTs = null, endTs = null } = params;
 
   return implSearchBrowsingHistory({
     searchTerm,
     startTs,
     endTs,
-    historyLimit,
+    historyLimit: MAX_HISTORY_RESULTS,
   });
-}
-
-/**
- * Strips heavy or unnecessary fields from a browser history search result.
- *
- * @param {string} result
- *  A JSON string representing the history search response.
- * @returns {string}
- *  The sanitized JSON string with large fields (e.g., favicon, thumbnail)
- *  removed, or the original string if parsing fails.
- */
-export function stripSearchBrowsingHistoryFields(result) {
-  try {
-    const data = JSON.parse(result);
-    if (
-      data.error ||
-      !Array.isArray(data.results) ||
-      data.results.length === 0
-    ) {
-      return result;
-    }
-
-    // Remove large or unnecessary fields to save tokens
-    const OMIT_KEYS = ["favicon", "thumbnail"];
-    for (const item of data.results) {
-      if (item && typeof item === "object") {
-        for (const k of OMIT_KEYS) {
-          delete item[k];
-        }
-      }
-    }
-    return JSON.stringify(data);
-  } catch {
-    return result;
-  }
 }
 
 /**
@@ -443,41 +388,140 @@ export class RunSearch {
     await new Promise(r => lazy.setTimeout(r, RunSearch.CONTENT_SETTLE_MS));
   }
 
+  static SERP_MAX_CHARS = 15000;
+
   static async #extractSerpContent(browser) {
     const windowContext = browser.browsingContext?.currentWindowContext;
     if (!windowContext) {
       return "Error: could not access search results page content.";
     }
 
-    const MAX_CHARS = 15000;
-    const extractionOptions = {
-      normalizeWhitespace: true,
-      maxLength: MAX_CHARS,
-    };
-
+    const url = browser.currentURI?.spec || "unknown";
     const pageExtractor = await windowContext.getActor("PageExtractor");
-    let extraction;
-    try {
-      extraction = await pageExtractor.getReaderModeContent(extractionOptions);
-    } catch {
-      // Fall back to full text extraction
-    }
 
-    if (!extraction) {
+    return runExtraction(pageExtractor, {
+      mode: "reader",
+      label: url,
+      maxLength: RunSearch.SERP_MAX_CHARS,
+    });
+  }
+}
+
+/**
+ * Build a URL-to-tab lookup from all AI Windows.
+ * Returns { byUrl: Map<string, tab>, byHost: Map<string, tab> }.
+ *
+ * @returns {{ byUrl: Map<string, object>, byHost: Map<string, object> }}
+ */
+function buildTabIndex() {
+  const byUrl = new Map();
+  const byHost = new Map();
+
+  for (const win of lazy.BrowserWindowTracker.orderedWindows) {
+    if (!lazy.AIWindow.isAIWindowActive(win) || win.closed || !win.gBrowser) {
+      continue;
+    }
+    for (const tab of win.gBrowser.tabs) {
+      const spec = tab?.linkedBrowser?.currentURI?.spec;
+      if (!spec) {
+        continue;
+      }
+      if (!byUrl.has(spec)) {
+        byUrl.set(spec, tab);
+      }
       try {
-        extraction = await pageExtractor.getText(extractionOptions);
+        const host = tab.linkedBrowser.currentURI.hostPort;
+        if (!byHost.has(host)) {
+          byHost.set(host, tab);
+        }
       } catch {
-        return "Error: failed to extract search results content.";
+        // no hostPort available
       }
     }
-
-    if (!extraction?.text) {
-      return "No content could be extracted from the search results page.";
-    }
-
-    const url = browser.currentURI?.spec || "unknown";
-    return `Search results from ${url}:\n\n${extraction.text}`;
   }
+
+  return { byUrl, byHost };
+}
+
+const EXTRACTION_MODES = {
+  viewport(pe, opts) {
+    return pe.getText({ ...opts, justViewport: true });
+  },
+  reader(pe, opts) {
+    return pe.getReaderModeContent(opts);
+  },
+  full(pe, opts) {
+    return pe.getText(opts);
+  },
+};
+
+const MODE_LABELS = {
+  viewport: "current viewport",
+  reader: "reader mode",
+  full: "full page",
+};
+
+/**
+ * Shared extraction logic used by both GetPageContent and RunSearch.
+ * Tries the primary mode, falls back to "full" when reader mode yields nothing.
+ *
+ * @param {object} pageExtractor
+ * @param {object} options
+ * @param {string} options.mode - "reader", "full", or "viewport"
+ * @param {string} options.label - human-readable label for error messages
+ * @param {number} options.maxLength
+ * @returns {Promise<string>}
+ */
+export async function runExtraction(
+  pageExtractor,
+  { mode = "reader", label = "", maxLength = 10000 } = {}
+) {
+  const selectedMode = EXTRACTION_MODES[mode] ? mode : "reader";
+
+  const extractionOptions = {
+    normalizeWhitespace: true,
+    maxLength,
+    sufficientLength: maxLength,
+    justViewport: false,
+  };
+
+  let extraction = null;
+  try {
+    extraction = await EXTRACTION_MODES[selectedMode](
+      pageExtractor,
+      extractionOptions
+    );
+  } catch (err) {
+    console.error("[SmartWindow] extraction mode failed", selectedMode, err);
+  }
+
+  let actualMode = selectedMode;
+
+  if (!extraction && selectedMode === "reader") {
+    try {
+      extraction = await EXTRACTION_MODES.full(
+        pageExtractor,
+        extractionOptions
+      );
+      if (extraction) {
+        actualMode = "full";
+      }
+    } catch (err) {
+      console.error("[SmartWindow] extraction fallback failed", err);
+    }
+  }
+
+  if (!extraction?.text) {
+    return `get_page_content(${selectedMode}) returned no content for ${label}.`;
+  }
+
+  const wasTruncated = extraction.text.length >= maxLength;
+  const truncationMarker = wasTruncated ? "\u2026" : "";
+  let result = `Content (${MODE_LABELS[actualMode]}) from ${label}:\n\n${extraction.text}${truncationMarker}`;
+  if (extraction.links?.length) {
+    result += `\n\nLinks found on page:\n${extraction.links.join("\n")}`;
+  }
+  return result;
 }
 
 /**
@@ -485,17 +529,7 @@ export class RunSearch {
  */
 export class GetPageContent {
   static DEFAULT_MODE = "reader";
-  static FALLBACK_MODE = "full";
   static MAX_CHARACTERS = 10000;
-
-  /** @type {Record<string, (pageExtractor: object, options: object) => Promise<{ text: string } | null>>} */
-  static MODE_HANDLERS = {
-    viewport: async (pageExtractor, options) =>
-      pageExtractor.getText({ justViewport: true, ...options }),
-    reader: async (pageExtractor, options) =>
-      pageExtractor.getReaderModeContent(options),
-    full: async (pageExtractor, options) => pageExtractor.getText(options),
-  };
 
   /**
    * Tool entrypoint for get_page_content.
@@ -507,33 +541,45 @@ export class GetPageContent {
    * @param {boolean} [securityProperties.untrusted_input]
    * @param {boolean} [securityProperties.private_data]
    * @returns {Promise<Array<string>>}
-   *  A promise resolving to a string containing the extracted page content
-   *  with a descriptive header, or an error message if extraction fails.
    */
   static async getPageContent(
     { url_list },
     allowedUrls = new Set(),
     securityProperties = {}
   ) {
-    // Ensure `url_list` is always an array
     if (!Array.isArray(url_list)) {
       throw new Error("getPageContent now requires { url_list: [...] }");
     }
 
+    // Build the tab index once for all URLs
+    const tabIndex = buildTabIndex();
+
     const promises = url_list.map(url =>
-      GetPageContent.#processSingleURL(url, allowedUrls, securityProperties)
+      GetPageContent.#processSingleURL(
+        url,
+        allowedUrls,
+        securityProperties,
+        tabIndex
+      )
     );
 
-    // Run all fetches in parallel
-    const ret_contents = await Promise.all(promises);
-    securityProperties.untrusted_input = true;
-    securityProperties.private_data = true;
-    return ret_contents;
+    return Promise.all(promises);
   }
 
-  static async #processSingleURL(url, allowedUrls, securityProperties) {
+  /**
+   * @param {string} url
+   * @param {Set<string>} allowedUrls
+   * @param {object} securityProperties
+   * @param {{ byUrl: Map<string, object>, byHost: Map<string, object> }} tabIndex
+   * @returns {Promise<string>}
+   */
+  static async #processSingleURL(
+    url,
+    allowedUrls,
+    securityProperties,
+    tabIndex
+  ) {
     try {
-      // Search through the allowed URLs and extract directly if exists
       if (!allowedUrls.has(url)) {
         //  Bug 2006418  - This will load the page headlessly, and then extract the content.
         // It might be a better idea to have the lifetime of the page be tied to the chat
@@ -550,156 +596,51 @@ export class GetPageContent {
           return `get_page_content is not available for ${url} when the conversation involves both untrusted input and private data.`;
         }
         return PageExtractorParent.getHeadlessExtractor(url, pageExtractor =>
-          GetPageContent.#runExtraction(
-            pageExtractor,
-            GetPageContent.DEFAULT_MODE,
-            url
-          )
+          runExtraction(pageExtractor, {
+            mode: GetPageContent.DEFAULT_MODE,
+            label: url,
+            maxLength: GetPageContent.MAX_CHARACTERS,
+          })
         );
       }
 
-      // Search through all AI Windows to find the tab with the matching URL
-      let targetTab = null;
-      for (const win of lazy.BrowserWindowTracker.orderedWindows) {
-        if (!lazy.AIWindow.isAIWindowActive(win)) {
-          continue;
-        }
+      // Look up the tab from the prebuilt index
+      let targetTab = tabIndex.byUrl.get(url) || null;
 
-        if (!win.closed && win.gBrowser) {
-          const tabs = win.gBrowser.tabs;
-
-          // Find the tab with the matching URL in this window
-          for (let i = 0; i < tabs.length; i++) {
-            const tab = tabs[i];
-            const currentURI = tab?.linkedBrowser?.currentURI;
-            if (currentURI?.spec === url) {
-              targetTab = tab;
-              break;
-            }
-          }
-
-          // If no match, try hostname matching for cases where protocols differ
-          if (!targetTab) {
-            try {
-              const inputHostPort = new URL(url).host;
-              targetTab = tabs.find(tab => {
-                try {
-                  const tabHostPort = tab.linkedBrowser.currentURI.hostPort;
-                  return tabHostPort === inputHostPort;
-                } catch {
-                  return false;
-                }
-              });
-            } catch {
-              // Invalid URL, continue with original logic
-            }
-          }
-
-          // If we found the tab, stop searching
-          if (targetTab) {
-            break;
-          }
+      // Fallback: hostname match for protocol differences
+      if (!targetTab) {
+        try {
+          const host = new URL(url).host;
+          targetTab = tabIndex.byHost.get(host) || null;
+        } catch {
+          // Invalid URL
         }
       }
 
-      // If still no match, abort
       if (!targetTab) {
         return `Cannot find URL: ${url}, page content extraction failed.`;
       }
 
-      // Attempt extraction
       const currentWindowContext =
         targetTab.linkedBrowser.browsingContext?.currentWindowContext;
 
       if (!currentWindowContext) {
         return `Cannot access content from "${targetTab.label}" at ${url}.`;
-        // Stripped message "The tab may still be loading or is not accessible." to not confuse the LLM
       }
 
-      // Extract page content using PageExtractor
       const pageExtractor =
         await currentWindowContext.getActor("PageExtractor");
 
-      return GetPageContent.#runExtraction(
-        pageExtractor,
-        GetPageContent.DEFAULT_MODE,
-        `"${targetTab.label}" (${url})`
-      );
+      return runExtraction(pageExtractor, {
+        mode: GetPageContent.DEFAULT_MODE,
+        label: `"${targetTab.label}" (${url})`,
+        maxLength: GetPageContent.MAX_CHARACTERS,
+      });
     } catch (error) {
       // Bug 2006425 - Decide on the strategy for error handling in tool calls
-      // i.e., will the LLM keep retrying get_page_content due to error?
       console.error(error);
       return `Error retrieving content from ${url}.`;
-      // Stripped ${error.message} content to not confuse the LLM
     }
-  }
-
-  /**
-   * Main extraction function.
-   * label is of form `{tab.title} ({tab.url})`.
-   *
-   * @param {PageExtractor} pageExtractor
-   * @param {string} mode
-   * @param {string} label
-   * @returns {Promise<string>}
-   *  A promise resolving to a formatted string containing the page content
-   *  with mode and label information, or an error message if no content is available.
-   */
-  static async #runExtraction(pageExtractor, mode, label) {
-    const selectedMode =
-      typeof mode === "string" && GetPageContent.MODE_HANDLERS[mode]
-        ? mode
-        : GetPageContent.DEFAULT_MODE;
-    const handler = GetPageContent.MODE_HANDLERS[selectedMode];
-    let extraction = null;
-
-    const extractionOptions = {
-      normalizeWhitespace: true,
-      maxLength: GetPageContent.MAX_CHARACTERS,
-    };
-
-    try {
-      extraction = await handler(pageExtractor, extractionOptions);
-    } catch (err) {
-      console.error(
-        "[SmartWindow] get_page_content mode failed",
-        selectedMode,
-        err
-      );
-    }
-
-    // Track which mode was actually used (in case we fall back)
-    let actualMode = selectedMode;
-
-    // If reader mode returns no content, fall back to full mode
-    if (!extraction && selectedMode === "reader") {
-      try {
-        const fallbackHandler =
-          GetPageContent.MODE_HANDLERS[GetPageContent.FALLBACK_MODE];
-        extraction = await fallbackHandler(pageExtractor, extractionOptions);
-        if (extraction) {
-          actualMode = GetPageContent.FALLBACK_MODE;
-        }
-      } catch (err) {
-        console.error(
-          "[SmartWindow] get_page_content fallback mode failed",
-          GetPageContent.FALLBACK_MODE,
-          err
-        );
-      }
-    }
-
-    if (!extraction?.text) {
-      return `get_page_content(${selectedMode}) returned no content for ${label}.`;
-    }
-
-    const modeLabel = {
-      viewport: "current viewport",
-      reader: "reader mode",
-      full: "full page",
-    }[actualMode];
-
-    return `Content (${modeLabel}) from ${label}:\n\n${extraction.text}`;
   }
 }
 
