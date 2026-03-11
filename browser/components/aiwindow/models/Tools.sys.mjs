@@ -10,6 +10,7 @@
 
 import { searchBrowsingHistory as implSearchBrowsingHistory } from "moz-src:///browser/components/aiwindow/models/SearchBrowsingHistory.sys.mjs";
 import { PageExtractorParent } from "resource://gre/actors/PageExtractorParent.sys.mjs";
+import { truncateUntrustedMetadata } from "moz-src:///browser/components/aiwindow/models/ChatUtils.sys.mjs";
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
@@ -191,7 +192,7 @@ export async function getOpenTabs(_params, _secProps) {
         if (url && !url.startsWith("about:")) {
           tabs.push({
             url,
-            title,
+            title: truncateUntrustedMetadata(title),
             lastAccessed: tab.lastAccessed,
           });
         }

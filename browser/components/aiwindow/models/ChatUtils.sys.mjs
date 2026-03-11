@@ -4,6 +4,31 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
+// Page titles are fully attacker controlled, HTML <title> elements have no
+// spec-enforced length limit, meaning a malicious page can embed
+// arbitrary-length injection payloads in its title. At 100 characters, the
+// maximum payload an attacker can deliver through a single title is roughly one
+// short sentence, insufficient for a reliable multi-step injection. The
+// function applies a Unicode ellipsis when truncation occurs so the LLM knows
+// the title was shortened.
+const MAX_METADATA_LENGTH = 100;
+
+/**
+ * Truncate untrusted metadata text to guard against prompt injection.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function truncateUntrustedMetadata(text) {
+  if (!text) {
+    return "";
+  }
+  if (text.length <= MAX_METADATA_LENGTH) {
+    return text;
+  }
+  return text.slice(0, MAX_METADATA_LENGTH) + "\u2026";
+}
+
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
@@ -53,7 +78,9 @@ export async function getCurrentTabMetadata(depsOverride) {
   }
 
   const url = browser.currentURI?.spec || "";
-  const title = browser.contentTitle || browser.documentTitle || "";
+  const title = truncateUntrustedMetadata(
+    browser.contentTitle || browser.documentTitle || ""
+  );
 
   let description = "";
   /**
@@ -61,7 +88,7 @@ export async function getCurrentTabMetadata(depsOverride) {
    * Need to extract page description in PageExtractor
    */
 
-  return { url, title, description };
+  return { url, title, description: truncateUntrustedMetadata(description) };
 }
 
 /**
