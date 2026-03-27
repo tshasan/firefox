@@ -10,7 +10,11 @@
  * @param {string} text
  */
 function normalizeWhitespace(text) {
-  return text.replaceAll("\n\n", "\n").replaceAll("\n", " ");
+  return text
+    .replaceAll("\n\n", "\n")
+    .replaceAll("\n", " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 add_task(async function test_dom_extractor_reader_mode() {

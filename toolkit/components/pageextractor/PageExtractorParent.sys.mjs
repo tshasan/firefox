@@ -33,10 +33,14 @@ export class PageExtractorParent extends JSWindowActorParent {
    * @see PageExtractorChild#getReaderModeContent
    *
    * @param {boolean} force - Bypass the `isProbablyReaderable` check.
+   * @param {Partial<GetTextOptions>} options
    * @returns {Promise<ExtractionResult>}
    */
-  getReaderModeContent(force = false) {
-    return this.sendQuery("PageExtractorParent:GetReaderModeContent", force);
+  getReaderModeContent(force = false, options = {}) {
+    return this.sendQuery("PageExtractorParent:GetReaderModeContent", {
+      force,
+      options,
+    });
   }
 
   /**
@@ -84,10 +88,12 @@ export class PageExtractorParent extends JSWindowActorParent {
     }
 
     if (options.removeBoilerplate) {
-      // Boilerplate removal is done by fetching the content in Reader Mode. If that
-      // fails then fallback to getting all of the content.
+      // Boilerplate removal is done by fetching the content in Reader Mode,
+      // then running extractTextFromDOM on the parsed HTML. This ensures
+      // links are only collected for text within sufficientLength.
       const response = await this.getReaderModeContent(
-        options._forceRemoveBoilerplate // This is a test-only option.
+        options._forceRemoveBoilerplate, // This is a test-only option.
+        options
       );
       if (options._forceRemoveBoilerplate && !response.text) {
         throw new Error(

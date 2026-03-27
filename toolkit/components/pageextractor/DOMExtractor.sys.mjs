@@ -16,6 +16,48 @@ const WHITESPACE_REGEX = /\s+/g;
 const MARKDOWN_TEXT_ESCAPE_REGEX = /[\[\]()]/g;
 const OPEN_PAREN_REGEX = /\(/g;
 const CLOSE_PAREN_REGEX = /\)/g;
+const LINE_TRIM_REGEX = /^[ \t]+|[ \t]+$/gm;
+const TAB_SPACE_RUN_REGEX = /[ \t]+/g;
+
+// HTML elements whose default display is block-like. Used as a fallback when
+// getComputedStyle is unavailable (e.g. documents created via DOMParser).
+const BLOCK_ELEMENTS = new Set([
+  "ADDRESS",
+  "ARTICLE",
+  "ASIDE",
+  "BLOCKQUOTE",
+  "DD",
+  "DETAILS",
+  "DIALOG",
+  "DIV",
+  "DL",
+  "DT",
+  "FIELDSET",
+  "FIGCAPTION",
+  "FIGURE",
+  "FOOTER",
+  "FORM",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+  "HEADER",
+  "HGROUP",
+  "HR",
+  "LI",
+  "MAIN",
+  "NAV",
+  "OL",
+  "P",
+  "PRE",
+  "SECTION",
+  "SUMMARY",
+  "TABLE",
+  "UL",
+]);
+const NEWLINE_COLLAPSE_REGEX = /\n{3,}/g;
 
 /**
  * The context for extracting text content from the DOM.
@@ -34,6 +76,14 @@ class ExtractionContext {
    * @type {GetDOMOptions}
    */
   #options;
+
+  /**
+   * When true, skip layout-dependent visibility checks (offsetWidth, etc.).
+   * Used for non-rendered DOMs like reader mode content parsed via DOMParser.
+   *
+   * @type {boolean}
+   */
+  #skipLayoutChecks = false;
 
   /**
    * The accumulated text content that has been extracted from the DOM.
@@ -77,6 +127,7 @@ class ExtractionContext {
    */
   constructor(document, options) {
     this.#options = options;
+    this.#skipLayoutChecks = !!options.skipLayoutChecks;
     this.#minCanvasSize = options.minCanvasSize ?? 50;
     this.#maxCanvasCount = options.includeCanvasSnapshots
       ? (options.maxCanvasCount ?? 10)
@@ -143,7 +194,10 @@ class ExtractionContext {
       return;
     }
 
-    if (isNodeHidden(canvas) || this.maybeOutOfViewport(canvas)) {
+    if (
+      isNodeHidden(canvas, this.#skipLayoutChecks) ||
+      this.maybeOutOfViewport(canvas)
+    ) {
       return;
     }
 
@@ -335,7 +389,7 @@ class ExtractionContext {
 
     this.#processedNodes.add(node);
 
-    if (isNodeHidden(node)) {
+    if (isNodeHidden(node, this.#skipLayoutChecks)) {
       return;
     }
 
@@ -356,6 +410,13 @@ class ExtractionContext {
       }
     } else if (text?.nodeValue) {
       innerText = text.nodeValue.trim();
+    }
+
+    if (innerText && this.#skipLayoutChecks) {
+      innerText = innerText
+        .replace(LINE_TRIM_REGEX, "")
+        .replace(TAB_SPACE_RUN_REGEX, " ")
+        .replace(NEWLINE_COLLAPSE_REGEX, "\n\n");
     }
 
     if (innerText) {
@@ -746,9 +807,10 @@ function nodeNeedsSubdividing(node) {
  * computed style, otherwise false.
  *
  * @param {Node} node
+ * @param {boolean} skipLayoutChecks
  * @returns {boolean}
  */
-function isNodeHidden(node) {
+function isNodeHidden(node, skipLayoutChecks = false) {
   const element = getHTMLElementForStyle(node);
 
   if (!element) {
@@ -774,6 +836,10 @@ function isNodeHidden(node) {
   ) {
     // The element is within a closed <details> and is not part of the <summary>, therefore it is not visible.
     return true;
+  }
+
+  if (skipLayoutChecks) {
+    return false;
   }
 
   // This forces reflow, which has a performance cost, but this is also what JQuery uses for its :hidden and :visible.
@@ -1023,7 +1089,9 @@ function getIsBlockLike(node) {
 
   const { ownerGlobal } = element;
   if (!ownerGlobal) {
-    return false;
+    // No window context (e.g. DOMParser document). Fall back to the HTML
+    // specification's default block-level elements.
+    return BLOCK_ELEMENTS.has(element.tagName);
   }
 
   if (element.namespaceURI === "http://www.w3.org/2000/svg") {

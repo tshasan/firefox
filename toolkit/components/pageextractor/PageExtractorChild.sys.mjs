@@ -55,7 +55,7 @@ export class PageExtractorChild extends JSWindowActorChild {
           const text = this.getAboutReaderContent();
           return { text: text ?? "", links: [], canvasSnapshots: [] };
         }
-        return this.getReaderModeContent(data);
+        return this.getReaderModeContent(data.force, data.options);
       case "PageExtractorParent:GetText":
         if (this.isAboutReader()) {
           const text = this.getAboutReaderContent();
@@ -220,9 +220,10 @@ export class PageExtractorChild extends JSWindowActorChild {
    * @see PageExtractorParent#getReaderModeContent for docs
    *
    * @param {boolean} force
+   * @param {Partial<GetTextOptions>} options
    * @returns {Promise<ExtractionResult>}
    */
-  async getReaderModeContent(force) {
+  async getReaderModeContent(force, options = {}) {
     const window = this.browsingContext?.window;
     const document = window?.document;
 
@@ -240,18 +241,28 @@ export class PageExtractorChild extends JSWindowActorChild {
       return EMPTY_EXTRACTION_RESULT;
     }
 
-    const { textContent, title } = readerModeDocument;
-
-    let text = collapseWhitespace(textContent);
-
-    if (title) {
-      text = title + "\n\n" + text;
+    const { content, title } = readerModeDocument;
+    if (!content) {
+      return EMPTY_EXTRACTION_RESULT;
     }
 
-    lazy.console.log("GetReaderModeContent", { force });
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(content, "text/html");
+    const extractionOpts = {
+      sufficientLength: options.sufficientLength,
+      skipLayoutChecks: true,
+    };
+    const result = lazy.extractTextFromDOM(doc, extractionOpts);
+    const text = title ? title + "\n\n" + result.text : result.text;
+    const links = result.links;
+
+    lazy.console.log("GetReaderModeContent", {
+      force,
+      linkCount: links.length,
+    });
     lazy.console.debug(text);
 
-    return { text, links: [], canvasSnapshots: [] };
+    return { text, links, canvasSnapshots: [] };
   }
 
   /**
@@ -422,76 +433,4 @@ export class PageExtractorChild extends JSWindowActorChild {
       return null;
     }
   }
-}
-
-/**
- * Reader mode provides the textContent of the HTMLElement and not the innerText so the
- * whitespace is not de-duplicated. This algorithm maintains at most 2 newlines in
- * some whitespace, or 1 whitespace character. Only "\n" and " " are retained. This is
- * similar to the whitespace collapsing behavior of rendered HTML. Note that this
- * algorithm ignores Unicode whitespace characters, which are a larger set of potential
- * characters.
- *
- * https://developer.mozilla.org/en-US/docs/Web/CSS/Guides/Text/Whitespace
- *
- * So:
- *   "\t\n \t"       => "\n"
- *   "\t\n \t\n\n\n" => "\n\n"
- *   "example     text" => "example text"
- *   "\n\r"      => ""
- *
- * @param {string} textContent
- * @returns {string}
- */
-function collapseWhitespace(textContent) {
-  textContent = textContent.trim();
-  let text = "";
-  let prevWasWhitespace = false;
-  let newLinesCount = 0;
-
-  for (let i = 0; i < textContent.length; i++) {
-    const ch = textContent[i];
-
-    if (
-      // Is this a whitespace character that is used in HTML whitespace collapsing?
-      ch === " " ||
-      ch === "\n" ||
-      ch === "\t" ||
-      ch === "\r"
-    ) {
-      // Remember that there was whitespace and count the newlines.
-      if (ch === "\n") {
-        newLinesCount++;
-      }
-      prevWasWhitespace = true;
-    } else {
-      // There is a character that needs to be added. Also add any whitespace that
-      // was encountered.
-
-      if (prevWasWhitespace) {
-        // Add the collapsed version of the whitespace.
-        if (newLinesCount == 0) {
-          text += " ";
-        } else if (newLinesCount == 1) {
-          text += "\n";
-        } else {
-          text += "\n\n";
-        }
-        // Reset the whitespace tracking varaibles.
-        newLinesCount = 0;
-        prevWasWhitespace = false;
-      }
-
-      // Add the next character.
-      text += ch;
-    }
-  }
-
-  if (prevWasWhitespace) {
-    throw new Error(
-      "Expected all of the trailing whitespace to be handled by String#trim"
-    );
-  }
-
-  return text;
 }

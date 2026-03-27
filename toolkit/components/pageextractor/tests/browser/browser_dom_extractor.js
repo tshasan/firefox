@@ -115,6 +115,63 @@ add_task(
   }
 );
 
+// Verifies that links extracted via the reader-mode path (removeBoilerplate)
+// are bounded by sufficientLength. Links in blocks beyond the cutoff must
+// not appear in the result.
+add_task(
+  async function test_dom_extractor_reader_mode_links_bounded_by_sufficient_length() {
+    const { actor, cleanup } = await html`
+      <article>
+        <p>
+          Visit the
+          <a href="https://example.com/early">early link</a> for context.
+        </p>
+        <p>Filler paragraph one provides some padding content.</p>
+        <p>Filler paragraph two provides more padding content.</p>
+        <p>Filler paragraph three provides even more padding.</p>
+        <p>
+          See the <a href="https://example.com/late">late link</a> for more.
+        </p>
+      </article>
+    `;
+
+    // Full extraction: both links should be present.
+    const full = await actor.getText({
+      removeBoilerplate: true,
+      _forceRemoveBoilerplate: true,
+    });
+
+    Assert.deepEqual(
+      full.links,
+      ["https://example.com/early", "https://example.com/late"],
+      "Full extraction returns both links"
+    );
+
+    // Choose a sufficientLength that covers the first paragraph but stops
+    // well before the last one. The DOM extractor checks sufficientLength
+    // between blocks, so links in later blocks will not be collected.
+    const earlyEnd = full.text.indexOf("for context.");
+    Assert.greater(earlyEnd, 0, "Sanity: found 'for context.' in text");
+
+    const bounded = await actor.getText({
+      removeBoilerplate: true,
+      _forceRemoveBoilerplate: true,
+      sufficientLength: earlyEnd + "for context.".length,
+    });
+
+    Assert.ok(
+      bounded.links.includes("https://example.com/early"),
+      "Bounded extraction includes link within sufficientLength"
+    );
+    Assert.ok(
+      !bounded.links.includes("https://example.com/late"),
+      "Bounded extraction excludes link beyond sufficientLength"
+    );
+
+    return cleanup();
+  }
+);
+
 add_task(async function test_dom_extractor_whitespace_collapse_reader_mode() {
   // prettier-ignore
   const { actor, cleanup } = await html`
@@ -151,11 +208,9 @@ add_task(async function test_dom_extractor_whitespace_collapse_reader_mode() {
       "newlines\n\nrepeated",
       "newlines\n\nrepeated",
       "newlines\n\nrepeated",
-      "",
       "mixed\nnewlines",
       "mixed\n\nnewlines",
       "mixed\n\nnewlines",
-      "",
       "space behavior",
       "space behavior",
       "space behavior",

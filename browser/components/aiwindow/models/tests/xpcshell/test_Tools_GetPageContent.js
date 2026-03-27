@@ -29,7 +29,9 @@ function createFakeBrowser(url, hasBrowsingContext = true) {
     browser.browsingContext = {
       currentWindowContext: {
         getActor: sinon.stub().resolves({
-          getText: sinon.stub().resolves({ text: "Sample page content" }),
+          getText: sinon
+            .stub()
+            .resolves({ text: "Sample page content", links: [] }),
           getReaderModeContent: sinon.stub().resolves({ text: "" }),
         }),
       },
@@ -92,7 +94,7 @@ add_task(async function test_getPageContent_exact_url_match() {
 
     const result_array = await GetPageContent.getPageContent(
       { url_list: [targetUrl] },
-      new Set([targetUrl]),
+      null,
       new SecurityProperties()
     );
 
@@ -128,7 +130,7 @@ add_task(async function test_getPageContent_multiple_urls() {
 
     const result_array = await GetPageContent.getPageContent(
       { url_list: [url1, url2] },
-      new Set([url1, url2]),
+      null,
       new SecurityProperties()
     );
 
@@ -158,10 +160,9 @@ add_task(async function test_getPageContent_tab_not_found_with_allowed_url() {
 
     setupBrowserWindowTracker(sb, createFakeWindow(tabs));
 
-    const allowedUrls = new Set([targetUrl]);
     const result_array = await GetPageContent.getPageContent(
       { url_list: [targetUrl] },
-      allowedUrls,
+      null,
       new SecurityProperties()
     );
 
@@ -194,8 +195,6 @@ add_task(
 
       setupBrowserWindowTracker(sb, createFakeWindow(tabs));
 
-      const allowedUrls = new Set(["https://different.com"]);
-
       const securityProperties = new SecurityProperties();
       securityProperties.setPrivateData();
       securityProperties.setUntrustedInput();
@@ -203,7 +202,7 @@ add_task(
 
       const result_array = await GetPageContent.getPageContent(
         { url_list: [targetUrl] },
-        allowedUrls,
+        null,
         securityProperties
       );
 
@@ -231,7 +230,7 @@ add_task(async function test_getPageContent_no_browsing_context() {
 
     const result_array = await GetPageContent.getPageContent(
       { url_list: [targetUrl] },
-      new Set([targetUrl]),
+      null,
       new SecurityProperties()
     );
     const result = result_array[0];
@@ -261,7 +260,7 @@ add_task(async function test_getPageContent_successful_extraction() {
     const pageContent = "This is a well-written article with lots of content.";
 
     const mockExtractor = {
-      getText: sinon.stub().resolves({ text: pageContent }),
+      getText: sinon.stub().resolves({ text: pageContent, links: [] }),
       getReaderModeContent: sinon.stub().resolves({ text: "" }),
     };
 
@@ -274,7 +273,7 @@ add_task(async function test_getPageContent_successful_extraction() {
 
     const result_array = await GetPageContent.getPageContent(
       { url_list: [targetUrl] },
-      new Set([targetUrl]),
+      null,
       new SecurityProperties()
     );
 
@@ -297,7 +296,7 @@ add_task(async function test_getPageContent_content_format() {
     const pageContent = "A".repeat(500);
 
     const mockExtractor = {
-      getText: sinon.stub().resolves({ text: pageContent }),
+      getText: sinon.stub().resolves({ text: pageContent, links: [] }),
       getReaderModeContent: sinon.stub().resolves({ text: "" }),
     };
 
@@ -310,7 +309,7 @@ add_task(async function test_getPageContent_content_format() {
 
     const result_array = await GetPageContent.getPageContent(
       { url_list: [targetUrl] },
-      new Set([targetUrl]),
+      null,
       new SecurityProperties()
     );
     const result = result_array[0];
@@ -333,7 +332,7 @@ add_task(async function test_getPageContent_empty_content() {
     const targetUrl = "https://example.com/empty";
 
     const mockExtractor = {
-      getText: sinon.stub().resolves({ text: "   \n  \n   " }),
+      getText: sinon.stub().resolves({ text: "   \n  \n   ", links: [] }),
       getReaderModeContent: sinon.stub().resolves({ text: "" }),
     };
 
@@ -346,7 +345,7 @@ add_task(async function test_getPageContent_empty_content() {
 
     const result_array = await GetPageContent.getPageContent(
       { url_list: [targetUrl] },
-      new Set([targetUrl]),
+      null,
       new SecurityProperties()
     );
 
@@ -382,7 +381,7 @@ add_task(async function test_getPageContent_extraction_error() {
 
     const result_array = await GetPageContent.getPageContent(
       { url_list: [targetUrl] },
-      new Set([targetUrl]),
+      null,
       new SecurityProperties()
     );
 
@@ -405,7 +404,7 @@ add_task(async function test_getPageContent_reader_mode_content() {
     const pageContent = "Clean reader mode text";
 
     const mockExtractor = {
-      getText: sinon.stub().resolves({ text: pageContent }),
+      getText: sinon.stub().resolves({ text: pageContent, links: [] }),
       getReaderModeContent: sinon.stub().resolves({ text: pageContent }),
     };
 
@@ -418,7 +417,7 @@ add_task(async function test_getPageContent_reader_mode_content() {
 
     const result_array = await GetPageContent.getPageContent(
       { url_list: [targetUrl] },
-      new Set([targetUrl]),
+      null,
       new SecurityProperties()
     );
 
@@ -445,7 +444,7 @@ add_task(async function test_getPageContent_invalid_url_format() {
 
     const result_array = await GetPageContent.getPageContent(
       { url_list: [targetUrl] },
-      new Set([targetUrl]),
+      null,
       new SecurityProperties()
     );
     const result = result_array[0];
@@ -466,7 +465,7 @@ add_task(async function test_getPageContent_refuses_both_security_flags() {
   secProps.commit();
   const result = await GetPageContent.getPageContent(
     { url_list: ["https://example.com"] },
-    new Set(),
+    null,
     secProps
   );
   Assert.equal(result.length, 1, "Should return one message");
@@ -488,7 +487,7 @@ add_task(async function test_getPageContent_allows_untrusted_input_only() {
     secProps.commit();
     const result = await GetPageContent.getPageContent(
       { url_list: [targetUrl] },
-      new Set([targetUrl]),
+      null,
       secProps
     );
     Assert.equal(result.length, 1, "Should return one result");

@@ -1263,9 +1263,21 @@ export class AIWindow extends MozLitElement {
 
       this.#addConversationTitle();
 
+      const actor = this.#getAIChatContentActor();
+      // Ensure the ledger is bound before reading it. setConversation is
+      // async (awaits the orchestrator singleton) and may still be in
+      // flight if the user submits quickly after opening a conversation
+      // or clicking "new chat".
+      if (actor && this.#conversation?.id) {
+        if (!actor.sessionLedger && !actor.ledgerReady) {
+          actor.setConversation(this.#conversation.id);
+        }
+        await actor.ledgerReady;
+      }
       await lazy.Chat.fetchWithHistory(this.#conversation, engineInstance, {
         inputText,
         browsingContext: this.#getBrowsingContext(),
+        sessionLedger: actor?.sessionLedger,
         telemetry: {
           location: this.mode,
         },
@@ -1466,14 +1478,15 @@ export class AIWindow extends MozLitElement {
   }
 
   /**
-   * Delivers all of the messages of a conversation to the child process
+   * Delivers all of the messages of a conversation to the child process.
+   * Awaits ledger setup so trusted URLs are pushed before messages render.
    *
    * @param {JSActor} actor
    */
-  #deliverConversationMessages(actor) {
-    // Notify actor of current conversation for security ledger access.
+  async #deliverConversationMessages(actor) {
+    // Await ledger setup so trusted URLs are available before messages render.
     if (this.#conversation?.id) {
-      actor.setConversation(this.#conversation.id);
+      await actor.setConversation(this.#conversation.id);
     }
 
     if (!this.#pendingMessageDelivery) {
@@ -1591,6 +1604,11 @@ export class AIWindow extends MozLitElement {
     // Clear conversation state. The new conversation's ID is persisted to the
     // host browser attribute and history.state so back navigation can restore it.
     this.#swapConversation(new lazy.ChatConversation({}));
+
+    // Bind the new conversation to a fresh session ledger so tools seed
+    // into the correct ledger instead of the previous conversation's.
+    const actor = this.#getAIChatContentActor();
+    actor?.setConversation(this.#conversation.id);
 
     this.#syncHistoryState();
 

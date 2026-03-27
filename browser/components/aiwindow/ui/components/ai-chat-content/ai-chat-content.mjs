@@ -35,6 +35,7 @@ export class AIChatContent extends MozLitElement {
   };
 
   #lastScrollReq = null;
+  #trustedUrlSet = null;
 
   constructor() {
     super();
@@ -178,6 +179,7 @@ export class AIChatContent extends MozLitElement {
   #handleTrustedUrlsUpdated(event) {
     const { trustedUrls } = event.detail;
     this.trustedUrls = Array.isArray(trustedUrls) ? [...trustedUrls] : [];
+    this.#trustedUrlSet = new Set(this.trustedUrls);
   }
 
   messageEvent(event) {
@@ -450,7 +452,7 @@ export class AIChatContent extends MozLitElement {
           .role=${msg.role}
           .messageId=${msg.messageId}
           .searchTokens=${msg.searchTokens || []}
-          .trustedUrls=${this.trustedUrls}
+          .trustedUrlSet=${this.#trustedUrlSet}
         ></ai-chat-message>
         ${msg.role === "assistant"
           ? html`

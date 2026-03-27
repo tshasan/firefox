@@ -63,7 +63,7 @@ add_task(async function test_fail_closed_default() {
       el.setAttribute("role", "assistant");
       elJS.messageId = "test-fail-closed";
       el.setAttribute("data-message-id", "test-fail-closed");
-      elJS.trustedUrls = SpecialPowers.Cu.cloneInto([], content);
+      elJS.trustedUrlSet = new content.wrappedJSObject.Set();
       elJS.message =
         "Check out [Example](https://example.com) and [Test](https://test.com).";
       el.setAttribute(
@@ -145,10 +145,9 @@ add_task(async function test_trusted_and_untrusted_links() {
 
         const elJS = el.wrappedJSObject || el;
 
-        // Set trustedUrls BEFORE message so it's available during first render
-        // Use SpecialPowers.Cu.cloneInto to properly pass array across compartment boundary
-        const trustedArray = SpecialPowers.Cu.cloneInto([trusted], content);
-        elJS.trustedUrls = trustedArray;
+        const trustedSet = new content.wrappedJSObject.Set();
+        trustedSet.add(trusted);
+        elJS.trustedUrlSet = trustedSet;
         elJS.role = "assistant";
         el.setAttribute("role", "assistant");
         elJS.messageId = "test-trusted-untrusted";
@@ -246,9 +245,7 @@ add_task(async function test_trust_update_triggers_rerender() {
 
       const elJS = el.wrappedJSObject || el;
 
-      // Initial render with empty trustedUrls
-      const emptyArray = SpecialPowers.Cu.cloneInto([], content);
-      elJS.trustedUrls = emptyArray;
+      elJS.trustedUrlSet = new content.wrappedJSObject.Set();
       elJS.role = "assistant";
       el.setAttribute("role", "assistant");
       elJS.messageId = "test-trust-update";
@@ -272,9 +269,9 @@ add_task(async function test_trust_update_triggers_rerender() {
         "Link should show untrusted label initially (fail-closed)"
       );
 
-      // Update trustedUrls to include the URL (new array instance)
-      const updatedArray = SpecialPowers.Cu.cloneInto([url], content);
-      elJS.trustedUrls = updatedArray;
+      const updatedSet = new content.wrappedJSObject.Set();
+      updatedSet.add(url);
+      elJS.trustedUrlSet = updatedSet;
 
       await ContentTaskUtils.waitForCondition(() => {
         const div = getRoot(el).querySelector(".message-assistant");
@@ -356,10 +353,9 @@ add_task(async function test_fragment_urls_match_base() {
 
         const elJS = el.wrappedJSObject || el;
 
-        // trustedUrls contains base URL (no fragment)
-        // Message contains URL with fragment - should still match
-        const baseArray = SpecialPowers.Cu.cloneInto([base], content);
-        elJS.trustedUrls = baseArray;
+        const baseSet = new content.wrappedJSObject.Set();
+        baseSet.add(base);
+        elJS.trustedUrlSet = baseSet;
         elJS.role = "assistant";
         el.setAttribute("role", "assistant");
         elJS.messageId = "test-fragment-match";
@@ -503,61 +499,43 @@ add_task(async function test_aiwindow_component_trust_smoke() {
       }, "ai-chat-content shadow DOM should be rendered");
     });
 
-    // Bind actor to the test conversation
+    // Bind actor to the test conversation and wait for ledger to be ready
     const actor = innerBC.currentWindowGlobal.getActor("AIChatContent");
-    actor.setConversation(testConversationId);
+    await actor.setConversation(testConversationId);
 
-    // Seed the URL from chrome - triggers the push chain:
-    // ledger.seedConversation -> "change" event -> parent pushes -> child receives
+    // Seed the URL into the ledger. It will be piggybacked onto the
+    // next dispatchMessageToChatContent call via the generation counter.
     ledger.seedConversation([trustedUrl]);
 
     info(`Seeded URL ${trustedUrl} into conversation ${testConversationId}`);
 
-    // Dispatch message and verify links
+    // Dispatch message through the parent actor so trusted URLs
+    // are piggybacked onto the IPC payload.
+    const testMessageId = "test-integration-msg";
+    actor.dispatchMessageToChatContent({
+      role: "assistant",
+      ordinal: 0,
+      id: testMessageId,
+      content: {
+        body: `Visit [Trusted](${trustedUrl}) or [Untrusted](${untrustedUrl}).`,
+      },
+      memoriesApplied: [],
+      tokens: { search: [] },
+      webSearchQueries: [],
+      followUpSuggestions: [],
+      convId: testConversationId,
+    });
+
     await SpecialPowers.spawn(
       innerBC,
-      [trustedUrl, untrustedUrl, testConversationId],
-      async (trusted, untrusted, convId) => {
+      [trustedUrl, untrustedUrl, testMessageId],
+      async (trusted, untrusted, msgId) => {
         const innerDoc = content.document;
         const chatContent = innerDoc.querySelector("ai-chat-content");
-        const chatContentJS = chatContent.wrappedJSObject || chatContent;
-
-        // Wait for trustedUrls to arrive via the actor push chain
-        await ContentTaskUtils.waitForCondition(() => {
-          return chatContentJS.trustedUrls?.length > 0;
-        }, "trustedUrls should be pushed via actor chain");
-
-        const testMessageId = "test-integration-msg";
-        const eventDetail = Cu.cloneInto(
-          {
-            role: "assistant",
-            ordinal: 0,
-            id: testMessageId,
-            content: {
-              body: `Visit [Trusted](${trusted}) or [Untrusted](${untrusted}).`,
-            },
-            memoriesApplied: [],
-            tokens: { search: [] },
-            webSearchQueries: [],
-            followUpSuggestions: [],
-            convId,
-          },
-          content
-        );
-
-        const messageEvent = new content.CustomEvent(
-          "aiChatContentActor:message",
-          {
-            detail: eventDetail,
-            bubbles: true,
-          }
-        );
-
-        chatContent.dispatchEvent(messageEvent);
 
         await ContentTaskUtils.waitForCondition(() => {
           const msg = chatContent.shadowRoot?.querySelector(
-            `ai-chat-message[data-message-id="${testMessageId}"]`
+            `ai-chat-message[data-message-id="${msgId}"]`
           );
           if (!msg) {
             return false;
@@ -572,7 +550,7 @@ add_task(async function test_aiwindow_component_trust_smoke() {
         }, "Message with trusted anchor, untrusted label, and disclosure anchor should render");
 
         const messageEl = chatContent.shadowRoot.querySelector(
-          `ai-chat-message[data-message-id="${testMessageId}"]`
+          `ai-chat-message[data-message-id="${msgId}"]`
         );
         const assistantDiv = (messageEl.shadowRoot ?? messageEl).querySelector(
           ".message-assistant"

@@ -21,30 +21,18 @@ export class AIChatMessage extends MozLitElement {
   #lastMessageElement = "";
   #lastTrustedUrlsRef = null;
 
-  /**
-   * Built from trustedUrls array in willUpdate().
-   *
-   * @type {Set<string>}
-   */
-  #trustedUrlSet = new Set();
-
   static properties = {
     role: { type: String }, // "user" | "assistant"
     message: { type: String },
     messageId: { type: String, reflect: true, attribute: "data-message-id" },
     searchTokens: { type: Array },
-    /**
-     * Trusted URLs for link validation, pushed from parent via ai-chat-content.
-     * Array type for Xray wrapper compatibility.
-     * Converted to internal Set in willUpdate().
-     */
-    trustedUrls: { type: Array, attribute: false },
+    trustedUrlSet: { attribute: false },
   };
 
   constructor() {
     super();
     this.searchTokens = [];
-    this.trustedUrls = null;
+    this.trustedUrlSet = null;
   }
 
   connectedCallback() {
@@ -81,25 +69,6 @@ export class AIChatMessage extends MozLitElement {
         target = target.parentElement;
       }
     });
-  }
-
-  /**
-   * Lit lifecycle hook called before each render.
-   * Converts trustedUrls array to internal Set.
-   *
-   * @param {Map} changed - Map of changed properties with previous values
-   */
-  willUpdate(changed) {
-    super.willUpdate?.(changed);
-    // Rebuild Set if trustedUrls changed, OR if Set is empty but array has values
-    // (handles case where trustedUrls was set before Lit started tracking)
-    if (
-      changed.has("trustedUrls") ||
-      (this.#trustedUrlSet.size === 0 && this.trustedUrls?.length > 0)
-    ) {
-      const list = Array.isArray(this.trustedUrls) ? this.trustedUrls : [];
-      this.#trustedUrlSet = new Set(list);
-    }
   }
 
   /**
@@ -203,7 +172,7 @@ export class AIChatMessage extends MozLitElement {
   #processLinks(root) {
     // Security validation is not active if null
     // i.e., browser.smartwindow.checkSecurityFlags is disabled
-    if (this.trustedUrls === null) {
+    if (this.trustedUrlSet === null) {
       return;
     }
 
@@ -217,8 +186,8 @@ export class AIChatMessage extends MozLitElement {
       }
 
       parsed.hash = "";
-      const href = parsed.href;
-      if (this.#trustedUrlSet.has(href)) {
+      const href = decodeURI(parsed.href);
+      if (this.trustedUrlSet.has(href)) {
         // TODO Bug 2022066: Allow fragments when full URL+fragment matches ledger.
         anchor.href = href;
       } else {
@@ -293,16 +262,16 @@ export class AIChatMessage extends MozLitElement {
 
   /**
    * Ensure our message element is up to date. This gets called from
-   * render and memoizes based on `this.message` and `this.trustedUrls`
+   * render and memoizes based on `this.message` and `this.trustedUrlSet`
    * to avoid unnecessary re-renders while still updating when trust changes.
    *
    * @returns {Element} HTML element containing the parsed markdown
    */
   getAssistantMessage() {
-    // Re-render if message changed OR trustedUrls reference changed
+    // Re-render if message changed OR trustedUrlSet reference changed
     if (
       this.message == this.#lastMessage &&
-      this.trustedUrls === this.#lastTrustedUrlsRef
+      this.trustedUrlSet === this.#lastTrustedUrlsRef
     ) {
       return this.#lastMessageElement;
     }
@@ -312,7 +281,7 @@ export class AIChatMessage extends MozLitElement {
     if (!this.message) {
       this.#lastMessage = this.message;
       this.#lastMessageElement = messageElement;
-      this.#lastTrustedUrlsRef = this.trustedUrls;
+      this.#lastTrustedUrlsRef = this.trustedUrlSet;
       return messageElement;
     }
 
@@ -321,7 +290,7 @@ export class AIChatMessage extends MozLitElement {
 
     this.#lastMessage = this.message;
     this.#lastMessageElement = messageElement;
-    this.#lastTrustedUrlsRef = this.trustedUrls;
+    this.#lastTrustedUrlsRef = this.trustedUrlSet;
 
     return messageElement;
   }

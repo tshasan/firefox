@@ -96,7 +96,7 @@ export function normalizeUrl(urlString, baseUrl = null) {
       normalizedUrl += `:${url.port}`;
     }
 
-    normalizedUrl += url.pathname;
+    normalizedUrl += decodeURI(url.pathname);
 
     if (search) {
       normalizedUrl += `?${search}`;
@@ -306,6 +306,12 @@ export class SessionLedger extends EventTarget {
   /** @type {Set<string>} Conversation-level trusted URLs (from @mentions) */
   #conversationUrls = new Set();
 
+  #generation = 0;
+
+  get generation() {
+    return this.#generation;
+  }
+
   /**
    * Creates a new session ledger.
    *
@@ -332,17 +338,14 @@ export class SessionLedger extends EventTarget {
    * @param {string[]} urls - URLs to seed
    */
   seedConversation(urls) {
-    let changed = false;
     for (const url of urls) {
       const normalized = normalizeUrl(url);
-      if (normalized.success && !this.#conversationUrls.has(normalized.url)) {
+      if (normalized.success) {
         this.#conversationUrls.add(normalized.url);
-        changed = true;
       }
     }
-    if (changed) {
-      this.dispatchEvent(new Event("change"));
-    }
+    this.#generation++;
+    this.dispatchEvent(new Event("change"));
   }
 
   /**

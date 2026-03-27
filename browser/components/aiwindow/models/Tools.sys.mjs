@@ -645,13 +645,18 @@ export class GetPageContent {
    *
    * @param {object} toolParams
    * @param {string[]} toolParams.url_list
-   * @param {Set<string>} mentionedUrls
+   * @param {object} [context]
+   * @param {SessionLedger} [context.sessionLedger]
    * @param {SecurityProperties} securityProperties
    * @returns {Promise<Array<string>>}
    *  A promise resolving to a string containing the extracted page content
    *  with a descriptive header, or an error message if extraction fails.
    */
-  static async getPageContent({ url_list }, mentionedUrls, securityProperties) {
+  static async getPageContent(
+    { url_list },
+    context = null,
+    securityProperties
+  ) {
     // This is a decision table for allowing and blocking fetches on the configuration of the
     // SecurityProperties and the URLs. Tab URLs don't do any new page loads. Mention urls
     // have been added by the user so they should be allowed. And all other URLs are
@@ -669,20 +674,19 @@ export class GetPageContent {
     }
 
     const results = await Promise.all(
-      url_list.map(async (url, index) => {
+      url_list.map(async url => {
         if (!isAllowedURL(url)) {
           return "This URL is not allowed: " + url;
         }
         try {
-          const text = await GetPageContent.#getPageContentsForSingleURL(
+          return await GetPageContent.#getPageContentsForSingleURL(
             url,
-            mentionedUrls,
+            context,
             securityProperties
           );
-          return text;
         } catch (error) {
           console.error(error);
-          return `Could not retrieve the content for the page: ${url_list[index]}`;
+          return `Could not retrieve the content for the page: ${url}`;
         }
       })
     );
@@ -714,16 +718,13 @@ export class GetPageContent {
 
   /**
    * @param {string} url
-   * @param {Set<string>} mentionedUrls
+   * @param {object} [context]
+   * @param {SessionLedger} [context.sessionLedger]
    * @param {object} securityProperties
    *
    * @returns {Promise<string>}
    */
-  static async #getPageContentsForSingleURL(
-    url,
-    mentionedUrls,
-    securityProperties
-  ) {
+  static async #getPageContentsForSingleURL(url, context, securityProperties) {
     // First try to get the contents from an existing tab. This is always allowed from
     // a security perspective as it doesn't involve a network request, so there is
     // no risk for data exfiltration.
@@ -744,16 +745,19 @@ export class GetPageContent {
       return GetPageContent.#runExtraction(
         pageExtractor,
         securityProperties,
+        context,
+        url,
         `${sanitizeUntrustedContent(tab.label)} (${url})`
       );
     }
 
     // Fetch the page headlessly since it's not loaded as a tab. This requires elevated
     // security permissions since an external network request is required, and is a
-    // risk for the exfiltration of private data. If the URL is mentioned by the user
-    // then the security properties check is bypassed here.
+    // risk for the exfiltration of private data. If the URL is in the session ledger
+    // (e.g. from @mentions or open tabs) the security check is bypassed here.
+    const isTrusted = context?.sessionLedger?.mergeAll().lookup(url);
     if (
-      !mentionedUrls.has(url) &&
+      !isTrusted &&
       securityProperties.untrustedInput &&
       securityProperties.privateData
     ) {
@@ -764,7 +768,13 @@ export class GetPageContent {
     }
 
     return PageExtractorParent.getHeadlessExtractor(url, pageExtractor =>
-      GetPageContent.#runExtraction(pageExtractor, securityProperties, url)
+      GetPageContent.#runExtraction(
+        pageExtractor,
+        securityProperties,
+        context,
+        url,
+        url
+      )
     );
   }
 
@@ -774,13 +784,22 @@ export class GetPageContent {
    *
    * @param {PageExtractor} pageExtractor
    * @param {SecurityProperties} securityProperties
+   * @param {object} [context]
+   * @param {SessionLedger} [context.sessionLedger]
+   * @param {string} pageUrl - The URL of the page being extracted
    * @param {string} label
    * @returns {Promise<string>}
    *  A promise resolving to a formatted string containing the page content
    *  with mode and label information, or an error message if no content is available.
    */
-  static async #runExtraction(pageExtractor, securityProperties, label) {
-    const { text } = await pageExtractor.getText({
+  static async #runExtraction(
+    pageExtractor,
+    securityProperties,
+    context,
+    pageUrl,
+    label
+  ) {
+    const { text, links } = await pageExtractor.getText({
       sufficientLength: GetPageContent.MAX_CHARACTERS,
       cleanWhitespace: true,
       removeBoilerplate: true,
@@ -789,6 +808,12 @@ export class GetPageContent {
     if (!text) {
       return `get_page_content returned no content for ${label}.`;
     }
+
+    // Seed the page URL and its extracted links into the session ledger
+    // so that citation validation and the rendering layer recognise them
+    // as trusted. The page URL itself must be included so that links
+    // back to the extracted page are also trusted.
+    context?.sessionLedger?.seedConversation([pageUrl, ...links]);
 
     // If an extraction succeeds set the security properties.
     // The page content is private since it uses a web page load that has credentials.

@@ -47,19 +47,6 @@ function getLastAssistantResponse(conversation) {
     .at(-1);
 }
 
-function makeConversation(messages = []) {
-  const conversation = new ChatConversation({
-    title: "test",
-    description: "test",
-    pageUrl: new URL("https://www.firefox.com"),
-    pageMeta: {},
-  });
-  for (const msg of messages) {
-    conversation.messages.push(msg);
-  }
-  return conversation;
-}
-
 add_task(async function test_Chat_real_tools_are_registered() {
   Assert.strictEqual(
     typeof Chat.toolMap.get_open_tabs,
@@ -478,8 +465,8 @@ add_task(
         "Empty arguments string should be converted to '{}'"
       );
       Assert.ok(
-        Chat.toolMap.get_open_tabs.calledTwice,
-        "Tool should be called twice: once by _collectInitialAllowedUrls, once by the tool call"
+        Chat.toolMap.get_open_tabs.calledOnce,
+        "Tool should be called once by the tool call"
       );
       Assert.equal(
         getLastAssistantResponse(conversation).content.body,
@@ -838,87 +825,6 @@ add_task(
 );
 
 add_task(
-  async function test_collectInitialAllowedUrls_adds_open_tabs_and_mentions() {
-    const sb = sinon.createSandbox();
-    try {
-      sb.stub(Chat.toolMap, "get_open_tabs").resolves([
-        { url: "https://example.com/page1", title: "Page 1" },
-        { url: "https://example.com/page2", title: "Page 2" },
-      ]);
-
-      const conversation = makeConversation([
-        {
-          role: "user",
-          content: {
-            body: "Check these",
-            contextMentions: [
-              { url: "https://mentioned.example.com/article" },
-              { url: "https://mentioned.example.com/docs" },
-            ],
-          },
-        },
-      ]);
-
-      const allowedUrls = new Set();
-      await Chat._collectInitialAllowedUrls(
-        conversation,
-        allowedUrls,
-        conversation.securityProperties
-      );
-
-      Assert.equal(allowedUrls.size, 4, "Should have 2 tab + 2 mention URLs");
-      Assert.ok(allowedUrls.has("https://example.com/page1"));
-      Assert.ok(allowedUrls.has("https://example.com/page2"));
-      Assert.ok(allowedUrls.has("https://mentioned.example.com/article"));
-      Assert.ok(allowedUrls.has("https://mentioned.example.com/docs"));
-    } finally {
-      sb.restore();
-    }
-  }
-);
-
-add_task(
-  async function test_collectInitialAllowedUrls_empty_when_no_tabs_or_mentions() {
-    const sb = sinon.createSandbox();
-    try {
-      sb.stub(Chat.toolMap, "get_open_tabs").resolves([]);
-
-      const conversation = makeConversation([
-        { role: "user", content: { body: "Hello" } },
-      ]);
-
-      const allowedUrls = new Set();
-      await Chat._collectInitialAllowedUrls(
-        conversation,
-        allowedUrls,
-        conversation.securityProperties
-      );
-
-      Assert.equal(allowedUrls.size, 0, "Should be empty");
-    } finally {
-      sb.restore();
-    }
-  }
-);
-
-add_task(async function test_collectAllowedUrlsFromToolCall_get_open_tabs() {
-  const allowedUrls = new Set();
-
-  Chat._collectAllowedUrlsFromToolCall(
-    "get_open_tabs",
-    [
-      { url: "https://tab1.example.com", title: "Tab 1" },
-      { url: "https://tab2.example.com", title: "Tab 2" },
-    ],
-    allowedUrls
-  );
-
-  Assert.equal(allowedUrls.size, 2);
-  Assert.ok(allowedUrls.has("https://tab1.example.com"));
-  Assert.ok(allowedUrls.has("https://tab2.example.com"));
-});
-
-add_task(
   async function test_Chat_fetchWithHistory_get_user_memories_called_when_memories_enabled() {
     const sb = sinon.createSandbox();
     try {
@@ -1067,6 +973,114 @@ add_task(
       Assert.ok(
         getUserMemoriesErrorMsg,
         "get_user_memories error should be raised when memories are disabled"
+      );
+    } finally {
+      sb.restore();
+    }
+  }
+);
+
+/**
+ * Creates a mock SessionLedger whose mergeAll().lookup() recognises the given URLs.
+ *
+ * @param {string[]} trustedUrls
+ * @returns {{ mergeAll: Function, seedConversation: Function, seededUrls: string[] }}
+ */
+function createMockSessionLedger(trustedUrls = []) {
+  const urlSet = new Set(trustedUrls);
+  const seededUrls = [];
+  return {
+    seededUrls,
+    mergeAll() {
+      return {
+        lookup(url) {
+          return urlSet.has(url) ? url : null;
+        },
+      };
+    },
+    seedConversation(links) {
+      for (const url of links) {
+        urlSet.add(url);
+        seededUrls.push(url);
+      }
+    },
+  };
+}
+
+add_task(
+  async function test_fetchWithHistory_passes_sessionLedger_to_get_page_content() {
+    const sb = sinon.createSandbox();
+    try {
+      let callCount = 0;
+      const fakeEngine = {
+        runWithGenerator(_options) {
+          callCount++;
+          async function* gen() {
+            if (callCount === 1) {
+              yield {
+                toolCalls: [
+                  {
+                    id: "call_gpc_ledger",
+                    function: {
+                      name: "get_page_content",
+                      arguments: JSON.stringify({
+                        url_list: ["https://example.com"],
+                      }),
+                    },
+                  },
+                ],
+              };
+            } else {
+              yield { text: "Done." };
+            }
+          }
+          return gen();
+        },
+        getConfig() {
+          return {};
+        },
+      };
+
+      const ledger = createMockSessionLedger(["https://example.com"]);
+      let receivedContext = null;
+
+      sb.stub(Chat.toolMap, "get_page_content").callsFake(
+        async (params, context, secProps) => {
+          receivedContext = context;
+          secProps.setPrivateData();
+          secProps.setUntrustedInput();
+          return ["page content"];
+        }
+      );
+      sb.stub(openAIEngine, "build").resolves(fakeEngine);
+      sb.stub(openAIEngine, "getFxAccountToken").resolves("mock_token");
+
+      const conversation = new ChatConversation({
+        title: "ledger pass-through test",
+        description: "desc",
+        pageUrl: new URL("https://www.firefox.com"),
+        pageMeta: {},
+      });
+      conversation.addUserMessage(
+        "Get page content",
+        "https://www.firefox.com",
+        0
+      );
+      conversation.addAssistantMessage("text", "");
+
+      const engineInstance = await openAIEngine.build(MODEL_FEATURES.CHAT);
+      await Chat.fetchWithHistory(conversation, engineInstance, {
+        sessionLedger: ledger,
+      });
+
+      Assert.ok(
+        receivedContext,
+        "Context should be passed to get_page_content"
+      );
+      Assert.strictEqual(
+        receivedContext.sessionLedger,
+        ledger,
+        "SessionLedger should be passed through context to get_page_content"
       );
     } finally {
       sb.restore();

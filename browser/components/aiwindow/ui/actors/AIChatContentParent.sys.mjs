@@ -42,20 +42,56 @@ export class AIChatContentParent extends JSWindowActorParent {
   #setConversationGeneration = 0;
 
   /**
-   * Bound handler for ledger "change" events.
-   * Stable reference needed for addEventListener/removeEventListener.
+   * Tracks the last ledger generation sent to the child.
+   * Compared against SessionLedger.generation to avoid resending
+   * unchanged URL arrays on every streaming chunk.
+   *
+   * @type {number}
    */
-  #onLedgerChange = () => this.#pushTrustedUrlsToChild();
+  #lastSentGeneration = -1;
+
+  /**
+   * Promise for the most recent #setConversation call.
+   * Allows callers to await an in-flight bind rather than starting a
+   * redundant one (e.g. when onCreateNewChatClick fires setConversation
+   * and the user submits before it resolves).
+   *
+   * @type {Promise<void>|null}
+   */
+  #ledgerReady = null;
+
+  /**
+   * @returns {SessionLedger|null}
+   */
+  get sessionLedger() {
+    return this.#sessionLedger;
+  }
+
+  /**
+   * @returns {Promise<void>|null}
+   */
+  get ledgerReady() {
+    return this.#ledgerReady;
+  }
 
   dispatchMessageToChatContent(message) {
-    // Ideally we should allowlist or use a schema to validate what we send to
-    // the child process, that is bug 2022057.
-    // We can't send URL objects through IPC, so we need to remove the pageUrl
-    // property before sending the message to the child process. We don't want
-    // to change the original message object which is used elsewhere, so we
-    // do a shallow clone first:
     message = Object.assign({}, message);
     delete message.pageUrl;
+
+    const checkSecurity = Services.prefs.getBoolPref(
+      "browser.smartwindow.checkSecurityFlags",
+      true
+    );
+
+    if (checkSecurity && this.#sessionLedger) {
+      const currentGen = this.#sessionLedger.generation;
+      if (currentGen !== this.#lastSentGeneration) {
+        const merged = this.#sessionLedger.mergeAll();
+        message.trustedUrls = merged.getAllUrls();
+        this.#lastSentGeneration = currentGen;
+      }
+    }
+
     this.sendAsyncMessage("AIChatContent:DispatchMessage", message);
   }
 
@@ -74,9 +110,11 @@ export class AIChatContentParent extends JSWindowActorParent {
    * Subscribes to ledger changes and pushes initial trusted URLs to child.
    *
    * @param {string|null} conversationId - The conversation identifier
+   * @returns {Promise<void>}
    */
   setConversation(conversationId) {
-    this.#setConversation(conversationId);
+    this.#ledgerReady = this.#setConversation(conversationId);
+    return this.#ledgerReady;
   }
 
   /**
@@ -138,25 +176,19 @@ export class AIChatContentParent extends JSWindowActorParent {
   }
 
   /**
-   * Removes the ledger change listener and clears the ledger reference.
+   * Clears the ledger reference and resets generation tracking.
    * Called when conversation changes or actor is destroyed.
    */
   #unsubscribeLedger() {
     if (this.#sessionLedger) {
-      this.#sessionLedger.removeEventListener("change", this.#onLedgerChange);
       this.#sessionLedger = null;
+      this.#lastSentGeneration = -1;
     }
   }
 
   #notifyContentReady() {
     const aiWindow = this.#getAIWindowElement();
     aiWindow?.onContentReady();
-
-    // If the ledger is already bound (setConversation completed before child
-    // was ready), push trusted URLs now that the child can receive messages.
-    if (this.#sessionLedger) {
-      this.#pushTrustedUrlsToChild();
-    }
   }
 
   #handleSearchFromChild(data) {
@@ -306,8 +338,7 @@ export class AIChatContentParent extends JSWindowActorParent {
       }
 
       this.#sessionLedger = orchestrator.registerSession(conversationId);
-      this.#sessionLedger.addEventListener("change", this.#onLedgerChange);
-      this.#pushTrustedUrlsToChild();
+      this.#lastSentGeneration = -1;
     } catch (e) {
       console.warn("Failed to set conversation for security ledger:", e);
     }
@@ -317,8 +348,8 @@ export class AIChatContentParent extends JSWindowActorParent {
    * Handles seeding a mentioned URL into the conversation ledger.
    *
    * Called at submission time when the user's message includes @mentions.
-   * The "change" event triggers a push automatically if subscribed.
-   * If not yet subscribed, URLs will be pushed once setConversation binds the ledger.
+   * The seeded URLs will be picked up by the next dispatchMessageToChatContent
+   * call via the generation counter.
    *
    * @param {object} data - Seed request data
    * @param {string} data.conversationId - Conversation to seed into
@@ -335,39 +366,6 @@ export class AIChatContentParent extends JSWindowActorParent {
       sessionLedger.seedConversation([url]);
     } catch (e) {
       console.warn("Failed to seed mentioned URL:", e);
-    }
-  }
-
-  /**
-   * Pushes the current trusted URL list to the child process.
-   *
-   * Uses the locally-held session ledger to build the trusted URL set.
-   * Returns early if no ledger is bound (e.g., before setConversation).
-   */
-  #pushTrustedUrlsToChild() {
-    if (!this.#sessionLedger) {
-      return;
-    }
-
-    // Security validation is gated behind this pref. When disabled,
-    // skip pushing trusted URLs so links render without validation.
-    if (
-      !Services.prefs.getBoolPref(
-        "browser.smartwindow.checkSecurityFlags",
-        true
-      )
-    ) {
-      return;
-    }
-
-    try {
-      const merged = this.#sessionLedger.mergeAll();
-      const trustedUrls = merged.getAllUrls();
-      this.sendAsyncMessage("AIChatContent:TrustedUrlsUpdated", {
-        trustedUrls,
-      });
-    } catch (e) {
-      console.warn("Failed to push trusted URLs to child:", e);
     }
   }
 }

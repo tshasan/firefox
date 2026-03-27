@@ -24,6 +24,9 @@ export type GetTextOptions = Partial<{
   removeBoilerplate: boolean;
   // A test-only option for forcing this behavior.
   _forceRemoveBoilerplate: boolean;
+  // Skip layout-dependent checks (offsetWidth/offsetHeight). Required when
+  // extracting from documents created via DOMParser that have no layout.
+  skipLayoutChecks: boolean;
 }>;
 
 export type GetDOMOptions = GetTextOptions;
