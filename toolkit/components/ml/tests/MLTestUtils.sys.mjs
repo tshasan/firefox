@@ -108,13 +108,33 @@ export class MockLLMEngine {
   /** @type {Map<number, MockedRequest>} */
   #runRequests = new Map();
 
+  /** @type {Array<() => void>} */
+  #nextRequestResolvers = [];
+
   get runRequests() {
-    if (!Cu.isInAutomation) {
-      throw new Error(
-        "The MockLLMEngine#runRequests property must only be used in automation."
-      );
-    }
     return this.#runRequests;
+  }
+
+  /**
+   * Resolve when the next run() / runWithGenerator() call enqueues a request.
+   * Resolves immediately if a request is already pending. Lets callers wait
+   * without polling.
+   *
+   * @returns {Promise<void>}
+   */
+  waitForNextRequest() {
+    if (this.#runRequests.size) {
+      return Promise.resolve();
+    }
+    const { promise, resolve } = Promise.withResolvers();
+    this.#nextRequestResolvers.push(resolve);
+    return promise;
+  }
+
+  #notifyNewRequest() {
+    while (this.#nextRequestResolvers.length) {
+      this.#nextRequestResolvers.shift()();
+    }
   }
 
   /**
@@ -137,7 +157,7 @@ export class MockLLMEngine {
     for (const [, { reject }] of this.#runRequests) {
       reject(new Error("Intentionally rejecting requests"));
     }
-    this.#runRequests = new Map();
+    this.#runRequests.clear();
   }
 
   /**
@@ -149,12 +169,6 @@ export class MockLLMEngine {
    * @param {MockedResponse} response
    */
   respond(requestId, response) {
-    if (!Cu.isInAutomation) {
-      throw new Error(
-        "The MockLLMEngine#respond method must only be used in automation."
-      );
-    }
-
     const runRequest = this.#runRequests.get(requestId);
     this.#runRequests.delete(requestId);
     if (!runRequest) {
@@ -183,6 +197,7 @@ export class MockLLMEngine {
      */
     const { promise, resolve, reject } = Promise.withResolvers();
     this.#runRequests.set(requestId, { request, resolve, reject });
+    this.#notifyNewRequest();
     const response = await promise;
 
     if (typeof response === "string") {
@@ -226,6 +241,7 @@ export class MockLLMEngine {
     // For manual testing without mockResponse, store the request and wait for respond()
     const { resolve, reject, promise } = Promise.withResolvers();
     this.#runRequests.set(requestId, { request, resolve, reject });
+    this.#notifyNewRequest();
 
     // Wait for respond() to be called with a response
     const response = await promise;
@@ -436,5 +452,102 @@ export const MLTestUtils = {
     }
 
     return { html };
+  },
+
+  /**
+   * Like serveHTMLInTab, but reuses a single HttpServer across many tabs. This
+   * avoids the cost of spinning up an HttpServer per tab when a test needs to
+   * open several pages (e.g. tab-list tests).
+   *
+   * cleanup() stops the HTTP server but does NOT remove the opened tabs. The
+   * caller is responsible for tab teardown — usually by closing the window
+   * that owns them via BrowserTestUtils.closeWindow(). Tabs opened into a
+   * persistent window (e.g. gBrowser) must be removed explicitly with
+   * BrowserTestUtils.removeTab().
+   *
+   * Example usage:
+   *   const server = await MLTestUtils.serveSharedHTMLInTab({ browser: gBrowser });
+   *   const { tab: t1 } = await server.openTab({ title: "First", body: "<p>1</p>" });
+   *   const { tab: t2 } = await server.openTab({ title: "Second", body: "<p>2</p>" });
+   *   await server.cleanup();
+   *
+   * @param {object} options
+   * @param {object} options.browser - The gBrowser object from test scope
+   * @param {number} [options.code] - HTTP status code (default: 200)
+   * @returns {Promise<{
+   *   openTab: (opts?: { title?: string, body?: string, browser?: object }) => Promise<{ tab: object, url: string }>,
+   *   cleanup: () => Promise<void>,
+   * }>}
+   */
+  async serveSharedHTMLInTab(options) {
+    const { browser: defaultBrowser, code = 200 } = options;
+
+    if (!defaultBrowser) {
+      throw new Error(
+        "browser is required. Pass it via serveSharedHTMLInTab({ browser: gBrowser })"
+      );
+    }
+
+    const server = new HttpServer();
+    server.start(-1);
+    const { primaryHost, primaryPort } = server.identity;
+    const encoder = new TextEncoder();
+
+    let nextPathId = 0;
+
+    async function openTab({
+      title = "",
+      body = "",
+      browser = defaultBrowser,
+    } = {}) {
+      const pathId = nextPathId++;
+      const path = `/page-${pathId}.html`;
+      const markup = title
+        ? `<!DOCTYPE html><html><head><title>${title
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")}</title></head><body>${body}</body></html>`
+        : `<!DOCTYPE html><body>${body}</body>`;
+      const htmlUtf8 = encoder.encode(markup);
+
+      /** @type {nsIHttpRequestHandler} */
+      const pageHandler = (request, response) => {
+        response.setHeader("Content-Type", "text/html; charset=utf-8");
+        response.setStatusLine(request.httpVersion, code, "");
+
+        const binaryOutputStream = Cc[
+          "@mozilla.org/binaryoutputstream;1"
+        ].createInstance(Ci.nsIBinaryOutputStream);
+
+        binaryOutputStream.setOutputStream(response.bodyOutputStream);
+        binaryOutputStream.writeByteArray(/** @type {any} */ (htmlUtf8));
+      };
+
+      server.registerPathHandler(path, pageHandler);
+
+      // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+      const url = `http://${primaryHost}:${primaryPort}${path}`;
+      const tab = await BrowserTestUtils.openNewForegroundTab(
+        browser,
+        url,
+        true // waitForLoad
+      );
+
+      if (title && tab.label !== title) {
+        await BrowserTestUtils.waitForEvent(
+          tab,
+          "TabAttrModified",
+          false,
+          () => tab.label === title
+        );
+      }
+
+      return { tab, url };
+    }
+
+    async function cleanup() {
+      await new Promise(resolve => server.stop(resolve));
+    }
+
+    return { openTab, cleanup };
   },
 };
