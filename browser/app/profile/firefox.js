@@ -2365,6 +2365,13 @@ pref("browser.smartwindow.worldcup.timeoutMs", 2000);
 pref("browser.smartwindow.searchQuery.endpointURL", "https://mlpa-prod-prod-mozilla.global.ssl.fastly.net/v1/search");
 pref("browser.smartwindow.searchQuery.apiKey", "");
 
+// Smart Window: build the chat engine, and the feature extraction engine that
+// memory retrieval needs, when the window opens rather than when the first turn
+// needs them. Removes the cold-start stall from the turn instead of relocating
+// it, which is what browser.smartwindow.memories.retrievalTimeoutMs above can
+// only trade off.
+pref("browser.smartwindow.prewarmEngines.enabled", true);
+
 // Smart Window Logging
 pref("browser.smartwindow.chatHistory.loglevel", "Error");
 pref("browser.smartwindow.chatStore.loglevel", "Error");
