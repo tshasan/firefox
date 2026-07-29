@@ -7,6 +7,7 @@ import { MODEL_FEATURES } from "moz-src:///browser/components/aiwindow/models/Ut
 
 import {
   constructRelevantMemoriesContextMessage,
+  getLocalIsoTime,
   replaceUrlsWithTokens,
   resolveMentionUrls,
   stripUnresolvedUrlTokens,
@@ -194,6 +195,15 @@ export class ChatConversation extends Conversation {
    * @type {string|null}
    */
   #lastBrowserContext = null;
+
+  /**
+   * Identifies the system prompt currently at index 0: resolved model plus
+   * calendar date. Transient (not persisted), so a conversation restored from
+   * the database has none and reassembles once on its next turn.
+   *
+   * @type {string|null}
+   */
+  #systemPromptKey = null;
 
   /**
    * Transient (not persisted): the in-flight relevant-memories retrieval for
@@ -652,18 +662,49 @@ export class ChatConversation extends Conversation {
   }
 
   /**
-   * Upserts the chat system prompt at index 0, always rewriting body and
-   * version so a fresh build (today's timestamp, latest RS content) wins.
+   * Upserts the chat system prompt at index 0.
+   *
+   * The system message is the prompt-cache prefix for every request in the
+   * conversation, so rewriting it invalidates the server-side cache for the
+   * tools block and the whole transcript behind it. The assembled prompt
+   * embeds a wall-clock timestamp (`{isoTimestamp}`, in the browser-context
+   * module of every published chat manifest), so consecutive builds are never
+   * byte-identical and a per-turn reload could never reuse the cache. It is
+   * therefore assembled once per (model, calendar date): the timestamp reads
+   * as the time the conversation started rather than the time of the latest
+   * turn, and the date stays correct across midnight. Callers passing opts want
+   * a specific build (model switch) and always reassemble.
    *
    * @param {object} [opts]
    * @param {string} [opts.model] - Model to assemble the prompt for; defaults
    *   to the conversation engine's model.
+   * @returns {Promise<ChatMessage>}
    */
   async loadSystemPrompt(opts = {}) {
+    const isExplicitBuild = !!Object.keys(opts).length;
+    const key = `${this.engine?.model ?? ""}|${getLocalIsoTime()?.split("T")[0] ?? ""}`;
+    const existing = this.messages.find(
+      message => message.role === MESSAGE_ROLE.SYSTEM
+    );
+
+    if (!isExplicitBuild && existing && this.#systemPromptKey === key) {
+      ChromeUtils.addProfilerMarker(
+        "SmartWindow",
+        {},
+        "System prompt reused, cache prefix preserved"
+      );
+      return existing;
+    }
+
     const { prompt: body, version } = await lazy.loadPrompt(
       MODEL_FEATURES.CHAT,
       { ...opts, model: opts.model ?? this.engine?.model }
     );
+
+    // An explicit build resolves its model from opts, which `key` does not
+    // describe. Leave the key unset so the next per-turn call rebuilds once
+    // against the engine's model and stabilizes from there.
+    this.#systemPromptKey = isExplicitBuild ? null : key;
 
     return this.setSystemMessage({
       type: SYSTEM_PROMPT_TYPE.TEXT,

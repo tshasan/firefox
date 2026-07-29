@@ -2113,9 +2113,11 @@ export class AIWindow extends MozLitElement {
       conversation.engine = engine;
       conversation.parameters = parameters;
 
-      // Rewrites the system prompt in place so a restored conversation gets
-      // today's timestamp and the latest RS content. The engine was just built
-      // for this model choice, so its model drives the v2 assembly.
+      // Assembles the system prompt on the conversation's first turn of the day
+      // and reuses it after that, so a restored conversation still picks up
+      // today's timestamp and the latest RS content without rewriting the
+      // prompt-cache prefix mid-conversation. The engine was just built for this
+      // model choice, so its model drives the v2 assembly.
       await conversation.loadSystemPrompt();
 
       if (inputText) {
