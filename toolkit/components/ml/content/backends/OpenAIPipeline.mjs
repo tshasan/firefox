@@ -215,16 +215,44 @@ export class OpenAIPipeline {
       port,
     } = args;
 
+    const createStartTime = ChromeUtils.now();
     const stream = await client.chat.completions.create(completionParams);
+    let lastChunkTime = ChromeUtils.now();
+    ChromeUtils.addProfilerMarker(
+      "MLEngine:OpenAI",
+      { startTime: createStartTime },
+      "Stream opened"
+    );
 
     let streamOutput = "";
     let toolAcc = new Map();
     let sawToolCallsFinish = false;
     let usage = null;
+    let chunkIndex = 0;
 
     for await (const chunk of stream) {
+      const chunkTime = ChromeUtils.now();
       const choice = chunk?.choices?.[0];
       const delta = choice?.delta ?? {};
+
+      // Chunk 0 spans stream-open to first chunk, which is the number that
+      // separates a slow first token from client-side buffering. Later chunks
+      // span the previous chunk's arrival, so they include its send work.
+      let chunkKind = "empty";
+      if (delta.content) {
+        chunkKind = "content";
+      } else if (delta.tool_calls) {
+        chunkKind = "tool_calls";
+      } else if (chunk?.usage) {
+        chunkKind = "usage";
+      }
+      ChromeUtils.addProfilerMarker(
+        "MLEngine:OpenAI",
+        { startTime: lastChunkTime },
+        `Raw chunk #${chunkIndex} ${chunkKind}`
+      );
+      chunkIndex++;
+      lastChunkTime = chunkTime;
 
       // Normal text tokens
       if (delta.content) {
@@ -306,7 +334,13 @@ export class OpenAIPipeline {
       port,
     } = args;
 
+    const createStartTime = ChromeUtils.now();
     const completion = await client.chat.completions.create(completionParams);
+    ChromeUtils.addProfilerMarker(
+      "MLEngine:OpenAI",
+      { startTime: createStartTime },
+      "Completion received"
+    );
     const message = completion.choices[0].message;
     const output = message.content || "";
     const toolCalls = message.tool_calls || null;
