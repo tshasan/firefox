@@ -28,6 +28,7 @@ import { ExaSearchProvider } from "moz-src:///browser/components/aiwindow/models
 import {
   GetPageContent,
   GET_PAGE_CONTENT,
+  speculativeConnectToSerpHosts,
 } from "moz-src:///browser/components/aiwindow/models/Tools.sys.mjs";
 
 const lazy = {};
@@ -447,6 +448,10 @@ export async function runSearchTheWeb(toolParams, conversation, signal) {
   conversation.addSerpUrlsForAnonymousFetch(searchedUrls);
   conversation.securityProperties.setPrivateData();
   conversation.securityProperties.setUntrustedInput();
+
+  // Start connection setup for the hosts the read loop is most likely to hit
+  // while the answer generation round trip is still in flight.
+  speculativeConnectToSerpHosts(searchedUrls, conversation.securityProperties);
 
   const fetchableSet = new Set(searchedUrls);
   const readUrls = [];

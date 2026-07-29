@@ -114,6 +114,11 @@ export const SEARCH_QUERY_ENDPOINT_PREF =
   "browser.smartwindow.searchQuery.endpointURL";
 export const SEARCH_QUERY_APIKEY_PREF =
   "browser.smartwindow.searchQuery.apiKey";
+const SPECULATIVE_CONNECT_PREF =
+  "browser.smartwindow.speculativeConnect.enabled";
+const SPECULATIVE_CONNECT_MAX_HOSTS_PREF =
+  "browser.smartwindow.speculativeConnect.maxHosts";
+const DEFAULT_SPECULATIVE_CONNECT_MAX_HOSTS = 3;
 
 export const TOOLS = [
   GET_OPEN_TABS,
@@ -870,6 +875,86 @@ function raceAbort(promise, signal) {
       }
     );
   });
+}
+
+/**
+ * Warms DNS, TCP, and TLS for the hosts most likely to be read by
+ * get_page_content, once the SERP ledger for a search has filled. The model
+ * only reads a handful of results, so this is deduped by host and capped.
+ *
+ * Purely an optimization: it is fire and forget, and every failure is
+ * swallowed so it can never break a search.
+ *
+ * @param {string[]} urls - Search result URLs, in result order.
+ * @param {SecurityProperties} securityProperties - Decides the anonymous flag,
+ *   which must match the branch #getPageContentsForSingleURL will take.
+ */
+export function speculativeConnectToSerpHosts(urls, securityProperties) {
+  if (!Services.prefs.getBoolPref(SPECULATIVE_CONNECT_PREF, false)) {
+    return;
+  }
+
+  const maxHosts = Services.prefs.getIntPref(
+    SPECULATIVE_CONNECT_MAX_HOSTS_PREF,
+    DEFAULT_SPECULATIVE_CONNECT_MAX_HOSTS
+  );
+  if (maxHosts <= 0) {
+    return;
+  }
+
+  // #getPageContentsForSingleURL only takes the LOAD_ANONYMOUS branch when both
+  // committed flags are already set. runSearchTheWeb merely stages them, and the
+  // commit does not land until the tool round ends, so on a first search these
+  // reads are not anonymous. The flag is part of the connection hash key (see
+  // nsHttpConnectionInfo::BuildHashKey), so guessing wrong warms a socket the
+  // real load cannot reuse.
+  const anonymous =
+    securityProperties.untrustedInput && securityProperties.privateData;
+
+  const startTime = ChromeUtils.now();
+  // Default origin attributes match the top level load the headless read does.
+  const originAttributes = {};
+  const seenHosts = new Set();
+  const warmedHosts = [];
+
+  for (const url of urls) {
+    if (warmedHosts.length >= maxHosts) {
+      break;
+    }
+    // https only, since PageExtractorParent.getHeadlessExtractor refuses an
+    // anonymous fetch of a non-loopback http: URL. Warming one would leak the
+    // host in cleartext for a page that is never going to be read.
+    const parsed = URL.parse(url);
+    if (!parsed || parsed.protocol !== "https:") {
+      continue;
+    }
+    if (seenHosts.has(parsed.host)) {
+      continue;
+    }
+    seenHosts.add(parsed.host);
+    try {
+      Services.io.speculativeConnectWithOriginAttributes(
+        parsed.URI,
+        originAttributes,
+        null,
+        anonymous
+      );
+      warmedHosts.push(parsed.host);
+    } catch (error) {
+      // The real load will pay for its own connection setup. Logged rather than
+      // swallowed so a systemic failure is not indistinguishable from the
+      // pref being off.
+      lazy.console.warn(`speculativeConnect failed for ${parsed.host}`, error);
+    }
+  }
+
+  if (warmedHosts.length) {
+    ChromeUtils.addProfilerMarker(
+      "SmartWindow",
+      { startTime },
+      `SpeculativeConnect(anonymous=${anonymous}, ${warmedHosts.join(", ")})`
+    );
+  }
 }
 
 /**
