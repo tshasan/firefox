@@ -483,9 +483,13 @@ add_task(
     try {
       sb.stub(Chat, "fetchWithHistory");
       sb.stub(openAIEngine, "build").resolves({});
-      const memoriesStub = sb
-        .stub(this.ChatConversation.prototype, "injectMemoriesContext")
-        .resolves(null);
+      // Bug 2058753 moved the retrieval off the critical path, so the turn
+      // starts it here and Chat.fetchWithHistory settles it just before the
+      // request is serialized.
+      const memoriesStub = sb.stub(
+        this.ChatConversation.prototype,
+        "startMemoriesRetrieval"
+      );
 
       const win = await openAIWindow();
       const browser = win.gBrowser.selectedBrowser;
@@ -494,12 +498,12 @@ add_task(
 
       await TestUtils.waitForCondition(
         () => memoriesStub.called,
-        "injectMemoriesContext should be called with memories enabled"
+        "startMemoriesRetrieval should be called with memories enabled"
       );
 
       Assert.ok(
         memoriesStub.calledOnce,
-        "injectMemoriesContext should be called once"
+        "startMemoriesRetrieval should be called once"
       );
 
       await BrowserTestUtils.closeWindow(win);
@@ -527,6 +531,10 @@ add_task(
       const memoriesStub = sb
         .stub(this.ChatConversation.prototype, "injectMemoriesContext")
         .resolves(null);
+      const startRetrievalStub = sb.stub(
+        this.ChatConversation.prototype,
+        "startMemoriesRetrieval"
+      );
 
       const win = await openAIWindow();
       const browser = win.gBrowser.selectedBrowser;
@@ -541,6 +549,10 @@ add_task(
       Assert.ok(
         memoriesStub.notCalled,
         "injectMemoriesContext should not be called when memories are disabled"
+      );
+      Assert.ok(
+        startRetrievalStub.notCalled,
+        "startMemoriesRetrieval should not be called when memories are disabled"
       );
 
       await BrowserTestUtils.closeWindow(win);

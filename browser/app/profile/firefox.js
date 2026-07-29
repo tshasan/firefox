@@ -2330,6 +2330,8 @@ pref("browser.smartwindow.endpoint", "https://mlpa-prod-prod-mozilla.global.ssl.
 pref("browser.smartwindow.memories.generateFromHistory", true);
 pref("browser.smartwindow.memories.generateFromConversation", true);
 pref("browser.smartwindow.memories.hasSeenMemories", false);
+// How long a chat turn waits for relevant memories before sending without them.
+pref("browser.smartwindow.memories.retrievalTimeoutMs", 750);
 pref("browser.smartwindow.memoriesLogLevel", "Warn");
 pref("browser.smartwindow.firstrun.autoAdvanceMS", 3000);
 pref("browser.smartwindow.firstrun.hasCompleted", false);

@@ -42,6 +42,8 @@ import { consumeStreamChunk } from "moz-src:///browser/components/aiwindow/model
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
+  clearTimeout: "resource://gre/modules/Timer.sys.mjs",
+  setTimeout: "resource://gre/modules/Timer.sys.mjs",
   convertTimestamp: "chrome://browser/content/firefoxview/helpers.mjs",
   ChatStore:
     "moz-src:///browser/components/aiwindow/ui/modules/ChatStore.sys.mjs",
@@ -65,6 +67,10 @@ ChromeUtils.defineLazyGetter(lazy, "console", function () {
     prefix: "ChatConversation",
   });
 });
+
+const MEMORIES_RETRIEVAL_TIMEOUT_PREF =
+  "browser.smartwindow.memories.retrievalTimeoutMs";
+const DEFAULT_MEMORIES_RETRIEVAL_TIMEOUT_MS = 750;
 
 const CHAT_ROLES = [MESSAGE_ROLE.USER, MESSAGE_ROLE.ASSISTANT];
 const RESTORABLE_ROLES = [...CHAT_ROLES, MESSAGE_ROLE.TOOL];
@@ -188,6 +194,18 @@ export class ChatConversation extends Conversation {
    * @type {string|null}
    */
   #lastBrowserContext = null;
+
+  /**
+   * Transient (not persisted): the in-flight relevant-memories retrieval for
+   * the current turn, started by startMemoriesRetrieval() and consumed by
+   * settlePendingMemoriesContext(). `promise` resolves to null when the
+   * retrieval failed or missed its budget. `prompt` keys the record so an
+   * overlapping submit cannot attach one turn's memories to another turn's
+   * message, and `userMessage` stays null until generatePrompt() adopts it.
+   *
+   * @type {?{prompt: string, promise: Promise<?object>, userMessage: ?ChatMessage}}
+   */
+  #pendingMemories = null;
 
   /**
    * @param {object} params
@@ -681,9 +699,10 @@ export class ChatConversation extends Conversation {
 
     // userContext starts empty so the user message can be added and dispatched
     // immediately for better perceived performance. The realTimeContext and
-    // memoriesContext properties are set on it by reference below before this
-    // method returns, so the full context is available to
-    // getMessagesInChatCompletionsFormat() when the LLM call is made.
+    // memoriesContext properties are set on it by reference below (memories
+    // possibly later, from settlePendingMemoriesContext()), so the full context
+    // is available to getMessagesInChatCompletionsFormat() when the LLM call is
+    // made.
     let userContext = {};
     const userMessage = this.addUserMessage(
       prompt,
@@ -699,7 +718,14 @@ export class ChatConversation extends Conversation {
       contextMentions: userOpts?.contextMentions,
     });
 
-    if (userOpts?.memoriesEnabled) {
+    if (!userOpts?.memoriesEnabled) {
+      this.#pendingMemories = null;
+    } else if (this.#pendingMemories?.prompt === prompt) {
+      // This turn's retrieval is already in flight; settlePendingMemoriesContext()
+      // awaits it just before the request is serialized.
+      this.#pendingMemories.userMessage = userMessage;
+    } else {
+      this.#pendingMemories = null;
       try {
         await this.injectMemoriesContext(userMessage, prompt);
       } catch (memoriesContextError) {
@@ -805,6 +831,100 @@ export class ChatConversation extends Conversation {
       userMessage.content.userContext ??= {};
       userMessage.content.userContext.memoriesContext = memoriesContext.content;
     }
+  }
+
+  /**
+   * Starts the relevant-memories retrieval without blocking, so the embedding
+   * work overlaps everything in the turn that does not depend on it (chat
+   * engine build, system prompt load, real-time context, FxA token fetch).
+   * The result is written onto the user message by
+   * settlePendingMemoriesContext(); a retrieval that misses its budget resolves
+   * to null and is dropped, so a cold embedding-model download cannot delay the
+   * first token.
+   *
+   * @param {string} prompt
+   * @param {Function} [constructMemories]
+   */
+  startMemoriesRetrieval(
+    prompt,
+    constructMemories = constructRelevantMemoriesContextMessage
+  ) {
+    const startTime = ChromeUtils.now();
+    const retrieval = (async () => {
+      try {
+        return await constructMemories(prompt);
+      } catch (memoriesContextError) {
+        lazy.console.error(
+          `Failed to generate memories context message: ${memoriesContextError}`
+        );
+        return null;
+      }
+    })();
+
+    let timer = null;
+    const budget = new Promise(resolve => {
+      timer = lazy.setTimeout(
+        () => {
+          ChromeUtils.addProfilerMarker(
+            "SmartWindow",
+            { startTime },
+            "Memories retrieval timed out, dropped"
+          );
+          resolve(null);
+        },
+        Services.prefs.getIntPref(
+          MEMORIES_RETRIEVAL_TIMEOUT_PREF,
+          DEFAULT_MEMORIES_RETRIEVAL_TIMEOUT_MS
+        )
+      );
+    });
+
+    if (this.#pendingMemories) {
+      ChromeUtils.addProfilerMarker(
+        "SmartWindow",
+        {},
+        "Memories retrieval superseded by a later submit"
+      );
+    }
+    this.#pendingMemories = {
+      prompt,
+      promise: Promise.race([retrieval, budget]).finally(() =>
+        lazy.clearTimeout(timer)
+      ),
+      userMessage: null,
+    };
+  }
+
+  /**
+   * Awaits the retrieval started by startMemoriesRetrieval() and writes its
+   * context onto the pending user message. Called from Chat.fetchWithHistory()
+   * immediately before the request is serialized, and a no-op when no retrieval
+   * was deferred for this turn.
+   *
+   * SECURITY: the write goes through injectMemoriesContext(), so memories are
+   * raised with setPrivateData() by the same code path as the inline case. The
+   * extra commit() is needed because generatePrompt() already committed; it is
+   * monotone, so it can only promote flags earlier, never demote them.
+   */
+  async settlePendingMemoriesContext() {
+    const pending = this.#pendingMemories;
+    this.#pendingMemories = null;
+    if (!pending?.userMessage) {
+      return;
+    }
+
+    const startTime = ChromeUtils.now();
+    await this.injectMemoriesContext(
+      pending.userMessage,
+      pending.prompt,
+      () => pending.promise
+    );
+    ChromeUtils.addProfilerMarker(
+      "SmartWindow",
+      { startTime },
+      "Memories retrieval wait"
+    );
+    this.securityProperties.commit();
   }
 
   /**

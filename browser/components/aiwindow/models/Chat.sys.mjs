@@ -423,6 +423,10 @@ Object.assign(Chat, {
       throw fxaError;
     }
 
+    // Last await before the request is serialized, so the memories embedding
+    // work overlaps everything above instead of blocking the turn on it.
+    await conversation.settlePendingMemoriesContext?.();
+
     const currentTurn = conversation.currentTurnIndex();
 
     /**
