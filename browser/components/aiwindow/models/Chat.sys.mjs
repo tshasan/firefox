@@ -365,6 +365,18 @@ Object.assign(Chat, {
 
         if (response.usage) {
           this.lastUsage = response.usage;
+          // Prefill dominates time-to-first-token once a transcript grows, so
+          // the share of prompt tokens the endpoint served from its cache is
+          // the deterministic read on request latency. A cached count that
+          // stays flat while prompt_tokens climbs means the prefix is being
+          // invalidated between turns.
+          ChromeUtils.addProfilerMarker(
+            "SmartWindow",
+            {},
+            `chat-prompt-cache(cached=${
+              response.usage.prompt_tokens_details?.cached_tokens ?? 0
+            }/prompt=${response.usage.prompt_tokens ?? 0})`
+          );
         }
       } catch (err) {
         console.error("fetchWithHistory streaming error:", err);
