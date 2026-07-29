@@ -2111,6 +2111,13 @@ export class AIWindow extends MozLitElement {
     conversation.on("chat-conversation:message-update", onUpdate);
 
     try {
+      // Start the memories retrieval before anything is awaited so its embedding
+      // work overlaps the rest of the turn. Chat.fetchWithHistory awaits it just
+      // before serializing the request.
+      if (inputText && userOpts.memoriesEnabled) {
+        conversation.startMemoriesRetrieval(inputText);
+      }
+
       const { engine, parameters } = await lazy.buildEngineForFeature(
         lazy.MODEL_FEATURES.CHAT,
         {
