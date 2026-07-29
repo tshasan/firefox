@@ -160,12 +160,20 @@ export class openAIEngine {
    * user who reads an answer before asking a follow-up would otherwise pay a
    * fresh handshake.
    *
-   * The real request is issued by a system-principal worker in the Inference
-   * process (OpenAIPipeline hands completionParams to the OpenAI client, which
-   * calls fetch), so it carries default origin attributes and is not anonymous.
-   * Both are part of the connection hash key (nsHttpConnectionInfo::
-   * BuildHashKey), so warming with anything else would populate a pool entry the
-   * real request cannot reuse and the warming would be pure overhead.
+   * The real request is a cross-origin fetch() issued by a system-principal
+   * worker in the Inference process, which means default origin attributes and
+   * LOAD_ANONYMOUS set. Both feed the connection hash key
+   * (nsHttpConnectionInfo::BuildHashKey), so the warm has to be anonymous too or
+   * it lands in a pool entry the request can never reuse. Measured against the
+   * real endpoint: with anonymous=false the pool holds the unused warm alongside
+   * the request's own new connection; with anonymous=true there is one
+   * connection whose ttl goes from 4 to 114, i.e. the warm served the request.
+   *
+   * Note the warm only helps if the request follows within roughly 5s. An
+   * unused speculative connection is reaped by then (measured: still present at
+   * 800ms, gone at 7s), whereas once it has served a request it gets the full
+   * keep-alive window. Turns after the first therefore need no warm at all -
+   * they reuse the previous request's socket.
    *
    * @param {string} [modelChoiceId] - Selected model choice id.
    */
@@ -197,7 +205,7 @@ export class openAIEngine {
         parsed.URI,
         {},
         SPECULATIVE_CONNECT_CALLBACKS,
-        false
+        true
       );
     } catch (error) {
       // The request will pay for its own connection setup. Logged rather than
@@ -210,7 +218,7 @@ export class openAIEngine {
     ChromeUtils.addProfilerMarker(
       "SmartWindow",
       { startTime },
-      `WarmEndpointConnection(anonymous=false, ${parsed.host})`
+      `WarmEndpointConnection(anonymous=true, ${parsed.host})`
     );
   }
 

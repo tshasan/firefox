@@ -18,17 +18,32 @@ const ENDPOINT_ORIGIN = "localhost:8443";
 
 /**
  * The connection hash key nsHttpConnectionInfo::BuildHashKey builds for an
- * https connection that is not anonymous, not private, and carries default
- * origin attributes: slot 1 'S' is end-to-end TLS, slot 2 staying '.' is what
- * says "not anonymous", and the key ending at the origin with no suffix is what
- * says "default origin attributes".
+ * https, anonymous, non-private connection with default origin attributes: slot
+ * 1 'S' is end-to-end TLS, slot 2 'A' is anonymous, and the key ending at the
+ * origin with no suffix is what says "default origin attributes".
  *
  * Asserting the whole key is the point of this test. The real chat request is a
- * fetch() issued by the system-principal ML engine worker, which hashes to this
- * same key, so a warm with any other key would land in a different connection
- * pool entry that the request could never reuse.
+ * cross-origin fetch() issued by the system-principal ML engine worker, so it
+ * sets LOAD_ANONYMOUS and hashes to this key; a warm with any other key lands in
+ * a different pool entry the request can never reuse.
+ *
+ * This expectation previously omitted the 'A', which is exactly why this test
+ * passed while the feature was broken - it asserted the warm's key against
+ * itself rather than against the request's.
+ *
+ * Known limit, so nobody trusts this further than it goes: the key cannot be
+ * compared against a real request's key from inside this test. The warm's
+ * published key can never carry the HappyEyeballs 'H' that a real request has,
+ * because nsHttpHandler publishes the notification before it calls
+ * SetHappyEyeballsEnabled; and a chrome-context fetch with credentials "omit" is
+ * not anonymous, so it is not a faithful stand-in for the worker's request.
+ * Reuse was therefore verified by hand against the real endpoint via
+ * nsIDashboard: a non-anonymous warm leaves the pool holding the unused warm
+ * plus the request's own new connection, while an anonymous warm leaves a single
+ * connection whose ttl goes from 4 to 114. Re-verify that way after touching
+ * this, not by trusting the constant below.
  */
-const EXPECTED_HASH_KEY = `.S.........[tlsflags0x00000000]${ENDPOINT_ORIGIN}`;
+const EXPECTED_HASH_KEY = `.SA........[tlsflags0x00000000]${ENDPOINT_ORIGIN}`;
 
 /**
  * Records the connection hash key of every speculative connection Gecko is
