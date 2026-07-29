@@ -71,12 +71,19 @@ add_setup(async function () {
   await clearAllMemories();
 
   // Stub relevant-memory injection to exercise only the tool path and avoid the
-  // embeddings model network call.
+  // embeddings model network call. Both entry points have to be covered: the
+  // window also prewarms the retrieval at open, which reaches the same engine.
   const relevantMemoriesStub = sinon
     .stub(MemoriesManager, "getRelevantMemories")
     .resolves([]);
+  const prewarmStub = sinon
+    .stub(MemoriesManager, "prewarmRelevantMemories")
+    .resolves();
 
-  registerCleanupFunction(() => relevantMemoriesStub.restore());
+  registerCleanupFunction(() => {
+    relevantMemoriesStub.restore();
+    prewarmStub.restore();
+  });
   registerCleanupFunction(clearAllMemories);
 });
 
