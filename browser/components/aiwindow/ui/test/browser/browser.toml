@@ -252,6 +252,8 @@ skip-if = [
 
 ["browser_smartwindow_panel_list.js"]
 
+["browser_smartwindow_prewarm_engines.js"]
+
 ["browser_smartwindow_prompt_cache_prefix.js"]
 
 ["browser_smartwindow_prompts.js"]

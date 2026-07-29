@@ -501,6 +501,15 @@ export class MemoriesManager {
   }
 
   /**
+   * Public API wrapper around MemoryStore.prewarmRelevantMemories
+   *
+   * @returns {Promise<void>}
+   */
+  static async prewarmRelevantMemories() {
+    return await MemoryStore.prewarmRelevantMemories();
+  }
+
+  /**
    * Public API wrapper around MemoryStore.getRelevantMemories
    *
    * @param {string} message                  User message to find relevant memories for

@@ -157,6 +157,7 @@ const TAB_FAVICON_CHAT =
 const PREF_CHAT_INTERACTION_COUNT = "browser.smartwindow.chat.interactionCount";
 const PREF_HIDE_TOP_SITES = "browser.smartwindow.hideTopSites";
 const PREF_AGENT_ENABLED = "browser.smartwindow.agent.enabled";
+const PREF_PREWARM_ENGINES = "browser.smartwindow.prewarmEngines.enabled";
 const MAX_INTERACTION_COUNT = 1000;
 const HISTORY_MENU_MAX_RECENT_CHATS = 6;
 
@@ -575,6 +576,7 @@ export class AIWindow extends MozLitElement {
     // the first keystroke may be much later, by which point keep-alive has
     // closed this socket and the turn needs its own.
     lazy.openAIEngine.speculativeConnect(this.#selectedModelChoiceId);
+    this.#prewarmEngines();
 
     this.ownerDocument.addEventListener("OpenConversation", this);
     this.ownerDocument.addEventListener(
@@ -1604,6 +1606,36 @@ export class AIWindow extends MozLitElement {
     }
     this.#hasWarmedChatEndpointThisTurn = true;
     lazy.openAIEngine.speculativeConnect(this.#selectedModelChoiceId);
+  }
+
+  /**
+   * Builds the engines a turn needs while the user is still deciding what to
+   * ask, so the first turn does not pay for them.
+   *
+   * Both are cache hits afterwards rather than saved references: the chat engine
+   * is reused by engineId inside MLEngineParent, and the embeddings work is held
+   * on MemoryStore. Failures are swallowed because this is speculative - the turn
+   * itself still builds whatever is missing and reports its own errors.
+   *
+   * @private
+   */
+  #prewarmEngines() {
+    if (!Services.prefs.getBoolPref(PREF_PREWARM_ENGINES, true)) {
+      return;
+    }
+
+    lazy
+      .buildEngineForFeature(lazy.MODEL_FEATURES.CHAT, {
+        flowId: this.conversationId,
+        modelChoiceIdOverride: this.#selectedModelChoiceId,
+      })
+      .catch(() => {});
+
+    // Only when memories could actually be injected, so a user who has them off
+    // never builds a feature extraction engine.
+    if (this.#memoriesIconShown) {
+      lazy.MemoriesManager.prewarmRelevantMemories().catch(() => {});
+    }
   }
 
   /**

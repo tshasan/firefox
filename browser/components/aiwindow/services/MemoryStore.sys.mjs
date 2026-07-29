@@ -661,6 +661,54 @@ export const MemoryStore = {
   },
 
   /**
+   * Creates the embeddings generator if needed and brings the memory embedding
+   * cache up to date, which is everything a retrieval has to do before it can
+   * embed the query. Re-embeds only when the memory set has changed.
+   *
+   * @param {Array<object>} memories
+   */
+  async ensureMemoryEmbeddings(memories) {
+    if (!this.embeddingsGenerator) {
+      this.embeddingsGenerator = EmbeddingsGenerator.forGeneral();
+    }
+
+    const currentCacheKey = this.computeMemoriesHash(memories);
+    if (
+      !this.memoryEmbeddingsCache ||
+      this.memoryCacheKey !== currentCacheKey
+    ) {
+      const memoryTexts = memories.map(m => {
+        const summary = m.memory_summary?.toLowerCase() || "";
+        const reasoning = m.reasoning?.toLowerCase() || "";
+        return reasoning ? `${summary}. ${reasoning}` : summary;
+      });
+      const result = await this.embeddingsGenerator.embedMany(memoryTexts);
+      this.memoryEmbeddingsCache = result.output || result;
+      this.memoryCacheKey = currentCacheKey;
+    }
+  },
+
+  /**
+   * Does a retrieval's setup ahead of the turn that needs it: builds the feature
+   * extraction engine, which on a cold profile includes downloading the model,
+   * and embeds the stored memories. Once this has run, a retrieval only has to
+   * embed the query, which is the one part that cannot be precomputed.
+   *
+   * @returns {Promise<void>}
+   */
+  async prewarmRelevantMemories() {
+    const memories = await this.getMemories({ includeSoftDeleted: false });
+    if (!memories.length) {
+      return;
+    }
+    if (!this.embeddingsGenerator) {
+      this.embeddingsGenerator = EmbeddingsGenerator.forGeneral();
+    }
+    await this.embeddingsGenerator.createEngineIfNotPresent();
+    await this.ensureMemoryEmbeddings(memories);
+  },
+
+  /**
    * Fetches relevant memories for a given user message using semantic similarity.
    * Uses embeddings and cosine similarity for fast, accurate memory retrieval.
    *
@@ -680,26 +728,7 @@ export const MemoryStore = {
       return [];
     }
 
-    // Lazy initialize embeddings generator
-    if (!this.embeddingsGenerator) {
-      this.embeddingsGenerator = EmbeddingsGenerator.forGeneral();
-    }
-
-    // Re-embed memories only if cache is invalid
-    const currentCacheKey = this.computeMemoriesHash(memories);
-    if (
-      !this.memoryEmbeddingsCache ||
-      this.memoryCacheKey !== currentCacheKey
-    ) {
-      const memoryTexts = memories.map(m => {
-        const summary = m.memory_summary?.toLowerCase() || "";
-        const reasoning = m.reasoning?.toLowerCase() || "";
-        return reasoning ? `${summary}. ${reasoning}` : summary;
-      });
-      const result = await this.embeddingsGenerator.embedMany(memoryTexts);
-      this.memoryEmbeddingsCache = result.output || result;
-      this.memoryCacheKey = currentCacheKey;
-    }
+    await this.ensureMemoryEmbeddings(memories);
 
     const queryResult = await this.embeddingsGenerator.embed(
       message.toLowerCase()
