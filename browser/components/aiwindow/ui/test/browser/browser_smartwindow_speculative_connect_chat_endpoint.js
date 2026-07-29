@@ -69,11 +69,14 @@ function observeChatEndpointWarms() {
 }
 
 /**
- * The endpoint is known before the first message is, so the socket to it should
- * already be warm by the time a request is built: once when the AI Window
- * opens, and again on the first keystroke of each turn, which is what recovers
- * a socket that network.http.keep-alive.timeout closed while the user was
- * reading the previous answer.
+ * The socket should be warm by the time a request is built: once when the AI
+ * Window opens, for the case where the user asks immediately, and then shortly
+ * after they stop typing.
+ *
+ * The warm rides a typing pause rather than the first keystroke because an
+ * unused speculative connection is reaped in about five seconds, so a warm at
+ * the first keystroke is already gone for anyone who spends longer composing.
+ * A pause is the cheapest signal that a submit is imminent.
  */
 add_task(async function test_chat_endpoint_connection_is_warmed() {
   await SpecialPowers.pushPrefEnv({
@@ -103,7 +106,19 @@ add_task(async function test_chat_endpoint_connection_is_warmed() {
     );
     const afterOpen = warms.keys.length;
 
+    // The window-open warm is still alive at this point, and the floor exists
+    // precisely so a second connection is not opened next to a live one. Wait it
+    // out, so what follows asserts the typing trigger rather than the floor.
+    /* eslint-disable-next-line mozilla/no-arbitrary-setTimeout */
+    await new Promise(resolve => setTimeout(resolve, 4200));
+
     await typeInSmartbar(sidebarBrowser, "What is the weather?");
+
+    await TestUtils.waitForCondition(
+      () => warms.keys.length > afterOpen,
+      "Pausing after typing should warm the endpoint, close enough to the submit that the connection is still pooled."
+    );
+
     await submitSmartbar(sidebarBrowser);
 
     const answer = "It is sunny.";
@@ -124,26 +139,138 @@ add_task(async function test_chat_endpoint_connection_is_warmed() {
     }, "The assistant should render a reply once the turn completes.");
     Assert.equal(rendered.message, answer, "The turn ran to completion.");
 
-    Assert.equal(
-      warms.keys.length,
-      afterOpen + 1,
-      "Typing a whole sentence warms the endpoint once, not once per keystroke."
-    );
+    const afterFirstTurn = warms.keys.length;
+
+    // The floor is measured from the last warm, so a follow-up typed straight
+    // away is exactly the case where a re-warm is suppressed as redundant. Wait
+    // it out so this asserts the trigger, not the floor.
+    /* eslint-disable-next-line mozilla/no-arbitrary-setTimeout */
+    await new Promise(resolve => setTimeout(resolve, 4200));
 
     await typeInSmartbar(sidebarBrowser, "And tomorrow?");
     await TestUtils.waitForCondition(
-      () => warms.keys.length > afterOpen + 1,
-      "The first keystroke of the next turn should warm the endpoint again."
-    );
-    Assert.equal(
-      warms.keys.length,
-      afterOpen + 2,
-      "The follow-up turn warms once more, and only once."
+      () => warms.keys.length > afterFirstTurn,
+      "Pausing while composing the follow-up should warm the endpoint again."
     );
 
     Assert.ok(
       warms.keys.every(key => key === EXPECTED_HASH_KEY),
       "Every warm used the connection key the chat request itself would use."
+    );
+  } finally {
+    mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
+    warms.stop();
+    await BrowserTestUtils.closeWindow(win);
+    await SpecialPowers.popPrefEnv();
+  }
+});
+
+/**
+ * The debounce itself, which the flow test above cannot express: typeInSmartbar
+ * fires a single input event no matter how long the string is, so a warm per
+ * input event and a warm per typing pause are indistinguishable through it. This
+ * drives the listener directly at a typing cadence instead - ten input events
+ * spaced under the debounce, which is one pause, and so one warm.
+ */
+add_task(async function test_typing_cadence_warms_once_not_per_event() {
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ["network.http.debug-observations", true],
+      ["browser.smartwindow.endpoint", `https://${ENDPOINT_ORIGIN}/v1`],
+    ],
+  });
+  const warms = observeChatEndpointWarms();
+  const mockEngineManager = new MockEngineManager();
+  const { win, sidebarBrowser } = await openAIWindowWithSidebar();
+
+  try {
+    await TestUtils.waitForCondition(
+      () => warms.keys.length,
+      "The window-open warm should land before this measures anything."
+    );
+
+    // Outlast the window-open warm, so this measures the trigger not the floor.
+    /* eslint-disable-next-line mozilla/no-arbitrary-setTimeout */
+    await new Promise(resolve => setTimeout(resolve, 4200));
+    const beforeTyping = warms.keys.length;
+
+    const EVENTS = 10;
+    await SpecialPowers.spawn(sidebarBrowser, [EVENTS], async count => {
+      const aiWindow = content.document.querySelector("ai-window");
+      const smartbar = aiWindow.shadowRoot.querySelector("#ai-window-smartbar");
+      for (let i = 0; i < count; i++) {
+        smartbar.dispatchEvent(new content.Event("input", { bubbles: true }));
+        // Under the debounce, so each event pushes the pending warm out.
+        await new Promise(resolve => content.setTimeout(resolve, 50));
+      }
+    });
+
+    await TestUtils.waitForCondition(
+      () => warms.keys.length > beforeTyping,
+      "The pause after the last input event should warm the endpoint."
+    );
+    Assert.equal(
+      warms.keys.length - beforeTyping,
+      1,
+      `${EVENTS} input events at typing speed warm once, not once per event.`
+    );
+  } finally {
+    mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
+    warms.stop();
+    await BrowserTestUtils.closeWindow(win);
+    await SpecialPowers.popPrefEnv();
+  }
+});
+
+/**
+ * A slow typist pauses between words, and every pause clears the debounce. The
+ * floor is what stops that becoming a connection per word: inside the interval
+ * the previous warm is still pooled, so a second one buys nothing and only costs
+ * a socket.
+ */
+add_task(async function test_pauses_inside_the_floor_do_not_rewarm() {
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ["network.http.debug-observations", true],
+      ["browser.smartwindow.endpoint", `https://${ENDPOINT_ORIGIN}/v1`],
+    ],
+  });
+  const warms = observeChatEndpointWarms();
+  const mockEngineManager = new MockEngineManager();
+  const { win, sidebarBrowser } = await openAIWindowWithSidebar();
+
+  try {
+    await TestUtils.waitForCondition(
+      () => warms.keys.length,
+      "The window-open warm should land before this measures anything."
+    );
+
+    /* eslint-disable-next-line mozilla/no-arbitrary-setTimeout */
+    await new Promise(resolve => setTimeout(resolve, 4200));
+    const beforeTyping = warms.keys.length;
+
+    // Gaps longer than the debounce, so each is its own pause and each schedules
+    // a warm, but all inside the floor.
+    const PAUSES = 4;
+    await SpecialPowers.spawn(sidebarBrowser, [PAUSES], async count => {
+      const aiWindow = content.document.querySelector("ai-window");
+      const smartbar = aiWindow.shadowRoot.querySelector("#ai-window-smartbar");
+      for (let i = 0; i < count; i++) {
+        smartbar.dispatchEvent(new content.Event("input", { bubbles: true }));
+        await new Promise(resolve => content.setTimeout(resolve, 700));
+      }
+    });
+
+    await TestUtils.waitForCondition(
+      () => warms.keys.length > beforeTyping,
+      "The first pause should still warm."
+    );
+    Assert.equal(
+      warms.keys.length - beforeTyping,
+      1,
+      `${PAUSES} separate pauses inside the floor warm once, not once per pause.`
     );
   } finally {
     mockEngineManager.rejectAllRequests();

@@ -158,6 +158,12 @@ const PREF_CHAT_INTERACTION_COUNT = "browser.smartwindow.chat.interactionCount";
 const PREF_HIDE_TOP_SITES = "browser.smartwindow.hideTopSites";
 const PREF_AGENT_ENABLED = "browser.smartwindow.agent.enabled";
 const PREF_PREWARM_ENGINES = "browser.smartwindow.prewarmEngines.enabled";
+// Short enough that a pause before pressing Enter still counts as a pause, long
+// enough that ordinary typing rhythm does not trip it.
+const ENDPOINT_WARM_DEBOUNCE_MS = 400;
+// Just under the ~5s an unused speculative connection survives, so a warm is
+// only replaced once the previous one is about to be reaped.
+const ENDPOINT_WARM_MIN_INTERVAL_MS = 4000;
 const PREF_COALESCE_STREAM_UPDATES =
   "browser.smartwindow.coalesceStreamUpdates.enabled";
 // Fast enough to read as continuous streaming, slow enough that a burst of
@@ -254,7 +260,9 @@ export class AIWindow extends MozLitElement {
   #hasMemories = false;
   #selectedModelChoiceId = null;
   #hasModelChoiceOverride = false;
-  #hasWarmedChatEndpointThisTurn = false;
+  #hasPrefetchedTokenThisTurn = false;
+  #endpointWarmTimer = null;
+  #lastEndpointWarmTime = null;
   #pendingStreamMessage = null;
   #pendingStreamTimer = null;
 
@@ -651,7 +659,7 @@ export class AIWindow extends MozLitElement {
     // Window open is its own warm, deliberately not counted against the turn:
     // the first keystroke may be much later, by which point keep-alive has
     // closed this socket and the turn needs its own.
-    lazy.openAIEngine.speculativeConnect(this.#selectedModelChoiceId);
+    this.#warmEndpointNow();
     this.#prewarmEngines();
 
     this.ownerDocument.addEventListener("OpenConversation", this);
@@ -885,6 +893,8 @@ export class AIWindow extends MozLitElement {
       this.#pendingStreamTimer = null;
     }
     this.#pendingStreamMessage = null;
+
+    this.#cancelPendingEndpointWarm();
 
     // A token fetched for a turn this window will now never send.
     lazy.openAIEngine.invalidatePrefetchedToken();
@@ -1668,7 +1678,8 @@ export class AIWindow extends MozLitElement {
    * @private
    */
   #handleSmartbarInput = () => {
-    this.#speculativeConnectForTurn();
+    this.#prefetchFxAccountTokenForTurn();
+    this.#scheduleEndpointWarm();
     this.#dispatchChromeEvent(
       "ai-window:smartbar-input",
       this.#getAIWindowEventOptions(this.#getSmartbarInputState())
@@ -1676,26 +1687,75 @@ export class AIWindow extends MozLitElement {
   };
 
   /**
-   * Warms the connection to the chat endpoint for the turn being composed, at
-   * most once so a typed sentence opens one speculative connection rather than
-   * one per keystroke.
-   *
-   * Per turn rather than on a timer because the thing being recovered from is
-   * per turn: network.http.keep-alive.timeout closes the socket while the user
-   * reads the previous answer, so the next turn needs its own warm however long
-   * that reading took.
+   * Starts the token fetch on the first keystroke of the turn. Earliest is best
+   * here, unlike the connection warm: the fetch does not expire, and
+   * fetchWithHistory awaits the token after the prompt is assembled, so the
+   * FxAccounts round trip otherwise sits between submit and the request.
    *
    * @private
    */
-  #speculativeConnectForTurn() {
-    if (this.#hasWarmedChatEndpointThisTurn) {
+  #prefetchFxAccountTokenForTurn() {
+    if (this.#hasPrefetchedTokenThisTurn) {
       return;
     }
-    this.#hasWarmedChatEndpointThisTurn = true;
-    lazy.openAIEngine.speculativeConnect(this.#selectedModelChoiceId);
-    // fetchWithHistory awaits the token after the prompt is assembled, so the
-    // FxAccounts round trip otherwise sits between submit and the request.
+    this.#hasPrefetchedTokenThisTurn = true;
     lazy.openAIEngine.prefetchFxAccountToken();
+  }
+
+  /**
+   * Schedules a connection warm for shortly after the user stops typing.
+   *
+   * Latest is best here, which is the opposite of the token: an unused
+   * speculative connection is reaped in about five seconds, while one that has
+   * served a request keeps the full ~115s keep-alive. Warming on the first
+   * keystroke therefore misses anyone who spends longer than that composing. A
+   * pause is the cheapest available signal that a submit is coming, so the warm
+   * rides the pause and lands inside the window that the request can still use.
+   *
+   * Continuous typing schedules nothing, since each keystroke pushes the timer
+   * out. The floor then stops a slow typist who pauses between every word from
+   * opening a connection per word: within that interval the previous warm is
+   * still alive, so there is nothing to gain from another.
+   *
+   * @private
+   */
+  #scheduleEndpointWarm() {
+    if (this.#endpointWarmTimer !== null) {
+      clearTimeout(this.#endpointWarmTimer);
+    }
+    this.#endpointWarmTimer = setTimeout(() => {
+      this.#endpointWarmTimer = null;
+      this.#warmEndpointNow();
+    }, ENDPOINT_WARM_DEBOUNCE_MS);
+  }
+
+  /**
+   * @private
+   */
+  #warmEndpointNow() {
+    const now = ChromeUtils.now();
+    if (
+      this.#lastEndpointWarmTime !== null &&
+      now - this.#lastEndpointWarmTime < ENDPOINT_WARM_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.#lastEndpointWarmTime = now;
+    lazy.openAIEngine.speculativeConnect(this.#selectedModelChoiceId);
+  }
+
+  /**
+   * Drops a warm that has not fired yet. The turn being sent makes it
+   * pointless: the request opens its own connection, which then carries the
+   * keep-alive the following turns reuse.
+   *
+   * @private
+   */
+  #cancelPendingEndpointWarm() {
+    if (this.#endpointWarmTimer !== null) {
+      clearTimeout(this.#endpointWarmTimer);
+      this.#endpointWarmTimer = null;
+    }
   }
 
   /**
@@ -2219,10 +2279,10 @@ export class AIWindow extends MozLitElement {
     this.#updateTabFavicon();
     this.#setBrowserContainerActiveState(true);
 
-    // The turn being sent consumes this turn's warm, so the next turn's first
-    // keystroke opens a fresh connection rather than trusting a socket that
-    // keep-alive may have closed while the user read this answer.
-    this.#hasWarmedChatEndpointThisTurn = false;
+    // The next turn needs its own token fetch, and a warm that has not fired
+    // yet is now pointless.
+    this.#hasPrefetchedTokenThisTurn = false;
+    this.#cancelPendingEndpointWarm();
 
     this.#abortController?.abort();
     this.#abortController = new AbortController();
