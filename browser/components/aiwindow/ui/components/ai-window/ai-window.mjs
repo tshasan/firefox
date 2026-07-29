@@ -161,6 +161,11 @@ const PREF_CHAT_INTERACTION_COUNT = "browser.smartwindow.chat.interactionCount";
 const PREF_HIDE_TOP_SITES = "browser.smartwindow.hideTopSites";
 const PREF_AGENT_ENABLED = "browser.smartwindow.agent.enabled";
 const PREF_PREWARM_ENGINES = "browser.smartwindow.prewarmEngines.enabled";
+const PREF_COALESCE_STREAM_UPDATES =
+  "browser.smartwindow.coalesceStreamUpdates.enabled";
+// Fast enough to read as continuous streaming, slow enough that a burst of
+// chunks cannot drive one full reparse and subtree rebuild each.
+const STREAM_DISPATCH_INTERVAL_MS = 16;
 const MAX_INTERACTION_COUNT = 1000;
 const HISTORY_MENU_MAX_RECENT_CHATS = 6;
 
@@ -253,6 +258,8 @@ export class AIWindow extends MozLitElement {
   #hasMemories = false;
   #selectedModelChoiceId = null;
   #hasModelChoiceOverride = false;
+  #pendingStreamMessage = null;
+  #pendingStreamTimer = null;
 
   get #kitMention() {
     return this.shadowRoot?.querySelector("kit-mention");
@@ -532,12 +539,14 @@ export class AIWindow extends MozLitElement {
     // chat-content document would anchor to that browser's viewport, not
     // ours. So we trigger our own chrome-side kit-mention here and strip
     // the token before dispatching to content to avoid double-render.
+    let carriedKit = false;
     if (this.mode === MODE.FULLPAGE && message.kit) {
       this.#kitMention?.trigger({
         value: message.kit,
         convId: message.convId,
       });
       message = { ...message, kit: undefined };
+      carriedKit = true;
     }
 
     if (message.toolUIData) {
@@ -547,8 +556,75 @@ export class AIWindow extends MozLitElement {
         message_seq: this.#conversation?.messageCount ?? 0,
       });
     }
+
+    // Plain streamed text is the only thing worth coalescing, and only when it
+    // carries nothing structural: the side effects above already ran for every
+    // update, so nothing is lost by dropping a redundant intermediate render.
+    // A kit-stripped message is a fresh copy rather than the live one, so it is
+    // dispatched as-is rather than queued.
+    const isPlainStreamedText =
+      !carriedKit &&
+      message.role === lazy.MESSAGE_ROLE.ASSISTANT &&
+      !message.toolUIData;
+    if (
+      isPlainStreamedText &&
+      Services.prefs.getBoolPref(PREF_COALESCE_STREAM_UPDATES, true)
+    ) {
+      this.#queueStreamDispatch(message);
+      return;
+    }
+
+    // Anything not coalesced must not overtake text already queued behind it.
+    this.#flushStreamDispatch();
     this.#dispatchMessageToChatContent(message);
   };
+
+  /**
+   * Queues the latest streamed assistant state for delivery to the chat content
+   * document, at most one dispatch per interval.
+   *
+   * Every dispatch structured clones the whole accumulated message across the
+   * process boundary, and the renderer reparses all of that markdown and rebuilds
+   * the subtree, so dispatching once per chunk makes both costs quadratic in the
+   * length of the answer - 308 content chunks in one measured session. The
+   * message object is mutated in place as chunks arrive, so a flush always sends
+   * the current text and only the redundant intermediate renders are dropped.
+   *
+   * A timer rather than requestAnimationFrame because the sidebar can be in a
+   * background tab while generating, where rAF is throttled or does not run at
+   * all and the answer would appear to stall.
+   *
+   * @param {ChatMessage} message
+   * @private
+   */
+  #queueStreamDispatch(message) {
+    this.#pendingStreamMessage = message;
+    if (this.#pendingStreamTimer !== null) {
+      return;
+    }
+    this.#pendingStreamTimer = setTimeout(() => {
+      this.#pendingStreamTimer = null;
+      this.#flushStreamDispatch();
+    }, STREAM_DISPATCH_INTERVAL_MS);
+  }
+
+  /**
+   * Delivers any queued streamed text immediately. Called before anything that
+   * must not arrive out of order, and when the message completes.
+   *
+   * @private
+   */
+  #flushStreamDispatch() {
+    if (this.#pendingStreamTimer !== null) {
+      clearTimeout(this.#pendingStreamTimer);
+      this.#pendingStreamTimer = null;
+    }
+    const message = this.#pendingStreamMessage;
+    this.#pendingStreamMessage = null;
+    if (message) {
+      this.#dispatchMessageToChatContent(message);
+    }
+  }
 
   onMemoriesApplied() {
     Glean.smartWindow.memoryApplied.record({
@@ -808,6 +884,14 @@ export class AIWindow extends MozLitElement {
     // does not prevent this window from being garbage collected.
     this.#starterPromptsAbortController?.abort();
     this.#starterPromptsAbortController = null;
+
+    // Drop any queued dispatch rather than firing it at a torn-down actor, and
+    // release the message it holds so it cannot keep this window alive.
+    if (this.#pendingStreamTimer !== null) {
+      clearTimeout(this.#pendingStreamTimer);
+      this.#pendingStreamTimer = null;
+    }
+    this.#pendingStreamMessage = null;
 
     this.#abortController?.abort();
     this.#abortController = null;
@@ -2262,6 +2346,8 @@ export class AIWindow extends MozLitElement {
   }
 
   #onMessageComplete = (_event, msg) => {
+    // The last chunk may still be queued; it has to land before completion.
+    this.#flushStreamDispatch();
     this.#addConversationTitle(msg?.content?.body);
 
     // Check if we need to inject retry toolUIData
