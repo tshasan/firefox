@@ -154,6 +154,27 @@ function filterFeatureGatedTools(tools) {
   return filtered;
 }
 
+const PARALLEL_TOOL_CALLS_PREF =
+  "browser.smartwindow.parallelToolCalls.enabled";
+
+/**
+ * Tools that are safe to run concurrently with their siblings in a single
+ * round. An entry must not steer control flow (no navigation, no handing the
+ * turn to the UI, no early return), must not depend on a sibling's result, and
+ * must not be the subject of a guard above that only inspects
+ * pendingToolCalls[0]. get_user_memories is absent for that last reason: its
+ * memories-disabled check is first-slot only, so running it from any other slot
+ * would bypass the user's opt-out. Every other tool falls back to the sequential
+ * path, so a newly added tool is safe by default until it is listed here.
+ */
+const PARALLEL_SAFE_TOOLS = new Set([
+  GET_OPEN_TABS,
+  SEARCH_BROWSING_HISTORY,
+  GET_PAGE_CONTENT,
+  GET_NAVIGATION_INFO,
+  GET_SKILL,
+]);
+
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   AIWindow:
@@ -205,6 +226,113 @@ function recordToolCallEvent({ toolName, mode, conversation, error }) {
     prompt_version: conversation.systemPromptVersion,
     error,
   });
+}
+
+/**
+ * Runs one round of parallel-safe tool calls concurrently, then appends the
+ * results to the transcript in the model's original tool_call order so the
+ * transcript never depends on completion order.
+ *
+ * @param {object} options
+ * @param {ToolCall[]} options.toolCalls
+ * @param {ChatConversation} options.conversation
+ * @param {BrowsingContext} options.browsingContext
+ * @param {"fullpage" | "sidebar" | "urlbar"} options.mode
+ * @param {number} options.turn - Turn index, for debug logging only.
+ */
+async function runParallelToolCalls({
+  toolCalls,
+  conversation,
+  browsingContext,
+  mode,
+  turn,
+}) {
+  const settled = await Promise.allSettled(
+    toolCalls.map(async ({ id, function: functionSpec }) => {
+      const toolName = functionSpec?.name || "";
+      const outcome = { toolCallId: id, toolName, body: null, error: "" };
+
+      ChromeUtils.addProfilerMarker(
+        "SmartWindow",
+        {},
+        `chat-run-tool-start(${toolName})`
+      );
+      const toolStart = ChromeUtils.now();
+
+      let toolParams = {};
+      try {
+        toolParams = functionSpec?.arguments
+          ? JSON.parse(functionSpec.arguments)
+          : {};
+        expandUrlTokensInToolParams(toolParams, conversation.tokenToUrl);
+      } catch {
+        ChromeUtils.addProfilerMarker(
+          "SmartWindow",
+          {},
+          `chat-run-tool-error(${toolName}:argument-parse)`
+        );
+        outcome.body = { error: "Invalid JSON arguments" };
+        outcome.error = "invalid_arguments";
+        return outcome;
+      }
+
+      try {
+        outcome.body = await executeToolByName(
+          toolName,
+          toolParams,
+          id,
+          conversation,
+          browsingContext,
+          mode
+        );
+        logConversationStream(
+          turn,
+          "TOOL EXEC",
+          { arguments: toolParams, result: outcome.body },
+          toolName
+        );
+        ChromeUtils.addProfilerMarker(
+          "SmartWindow",
+          { startTime: toolStart },
+          `chat-run-tool-complete(${toolName})`
+        );
+      } catch (error) {
+        console.error(error);
+        outcome.body = { error: `Tool execution failed: ${String(error)}` };
+        outcome.error = "execution_failed";
+        ChromeUtils.addProfilerMarker(
+          "SmartWindow",
+          { startTime: toolStart },
+          `chat-run-tool-error(${toolName})`
+        );
+      }
+      return outcome;
+    })
+  );
+
+  // Every declared tool_call must get a result message, so a rejection that
+  // escaped the inner handlers still has to produce one. Without this the
+  // persisted transcript keeps N tool_calls and zero results, and every later
+  // turn re-sends it.
+  const outcomes = settled.map((result, index) =>
+    result.status === "fulfilled"
+      ? result.value
+      : {
+          toolCallId: toolCalls[index].id,
+          toolName: toolCalls[index].function?.name || "",
+          body: { error: `Tool execution failed: ${String(result.reason)}` },
+          error: "execution_failed",
+        }
+  );
+
+  for (const { toolCallId, toolName, body, error } of outcomes) {
+    conversation.addToolCallMessage({
+      tool_call_id: toolCallId,
+      body,
+      name: toolName,
+    });
+    recordToolCallEvent({ toolName, mode, conversation, error });
+  }
 }
 
 /**
@@ -464,22 +592,29 @@ Object.assign(Chat, {
         }
       }
 
-      // @todo Bug 2006159 - Implement parallel tool calling
+      const runInParallel =
+        pendingToolCalls.length > 1 &&
+        Services.prefs.getBoolPref(PARALLEL_TOOL_CALLS_PREF, false) &&
+        pendingToolCalls.every(tc =>
+          PARALLEL_SAFE_TOOLS.has(tc.function?.name)
+        );
 
-      // Take the last tool call and ensure the serialized tool calls expand any
-      // URL tokens.
-      const lastToolCall = structuredClone(pendingToolCalls[0]);
-      if (!lastToolCall.function.arguments) {
-        // Ensure that the arguments are always present.
-        lastToolCall.function.arguments = "{}";
-      }
-      expandUrlTokensInToolParams(
-        lastToolCall.function,
-        conversation.tokenToUrl
-      );
+      // Only the tool calls this round actually answers may be declared, so
+      // every `tool_calls` entry has a matching `tool` result message. The
+      // sequential path answers one call per round.
+      const roundToolCalls = runInParallel
+        ? pendingToolCalls
+        : pendingToolCalls.slice(0, 1);
 
       conversation.addAssistantMessage("function", {
-        tool_calls: [lastToolCall],
+        tool_calls: roundToolCalls.map(({ id, function: functionSpec }) => {
+          const declared = {
+            name: functionSpec.name,
+            arguments: functionSpec.arguments || "{}",
+          };
+          expandUrlTokensInToolParams(declared, conversation.tokenToUrl);
+          return { id, type: "function", function: declared };
+        }),
       });
 
       lazy.AIWindow.chatStore?.updateConversation(conversation).catch(() => {});
@@ -490,7 +625,31 @@ Object.assign(Chat, {
         `chat-tools-detected(${pendingToolCalls.length})`
       );
 
-      for (const toolCall of pendingToolCalls) {
+      if (runInParallel) {
+        const parallelStart = ChromeUtils.now();
+        await runParallelToolCalls({
+          toolCalls: roundToolCalls,
+          conversation,
+          browsingContext,
+          mode,
+          turn: currentTurn,
+        });
+        ChromeUtils.addProfilerMarker(
+          "SmartWindow",
+          { startTime: parallelStart },
+          `chat-tools-parallel(${roundToolCalls.length})`
+        );
+        lazy.AIWindow.chatStore
+          ?.updateConversation(conversation)
+          .catch(() => {});
+        conversation.securityProperties.commit();
+        lazy.console.log(
+          `Security commit ${conversation.securityProperties.getLogText()}`
+        );
+        continue;
+      }
+
+      for (const toolCall of roundToolCalls) {
         const { id, function: functionSpec } = toolCall;
         const toolName = functionSpec?.name || "";
         let toolParams = {};
@@ -641,7 +800,6 @@ Object.assign(Chat, {
           return;
         }
 
-        // @todo Bug 2006159 - Implement parallel tool calling
         break;
       }
 

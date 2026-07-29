@@ -2368,6 +2368,11 @@ pref("browser.smartwindow.searchQuery.apiKey", "");
 pref("browser.smartwindow.speculativeConnect.enabled", false);
 pref("browser.smartwindow.speculativeConnect.maxHosts", 3);
 
+// Smart Window: run several parallel-safe tool calls from one round together,
+// instead of one tool call per round trip (bug 2058757). Off until an eval
+// confirms the endpoint and the models handle multi-call rounds.
+pref("browser.smartwindow.parallelToolCalls.enabled", false);
+
 // Smart Window Logging
 pref("browser.smartwindow.chatHistory.loglevel", "Error");
 pref("browser.smartwindow.chatStore.loglevel", "Error");
