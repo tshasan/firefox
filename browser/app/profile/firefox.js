@@ -2364,6 +2364,12 @@ pref("browser.smartwindow.worldcup.timeoutMs", 2000);
 pref("browser.smartwindow.searchQuery.endpointURL", "https://mlpa-prod-prod-mozilla.global.ssl.fastly.net/v1/search");
 pref("browser.smartwindow.searchQuery.apiKey", "");
 
+// Smart Window: deliver streamed assistant text to the chat content document at
+// most once per frame instead of once per chunk. Each delivery clones the whole
+// accumulated message across the process boundary and the renderer reparses all
+// of it, so per-chunk delivery is quadratic in the answer's length.
+pref("browser.smartwindow.coalesceStreamUpdates.enabled", true);
+
 // Smart Window: build the chat engine, and the feature extraction engine that
 // memory retrieval needs, when the window opens rather than when the first turn
 // needs them. Removes the cold-start stall from the turn instead of relocating

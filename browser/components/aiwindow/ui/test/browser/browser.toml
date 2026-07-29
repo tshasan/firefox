@@ -213,6 +213,8 @@ skip-if = [
 
 ["browser_smartwindow_classic_mode_switch.js"]
 
+["browser_smartwindow_coalesced_stream_updates.js"]
+
 ["browser_smartwindow_content.js"]
 
 ["browser_smartwindow_context_url.js"]
