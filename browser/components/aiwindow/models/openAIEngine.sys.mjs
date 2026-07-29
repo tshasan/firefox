@@ -260,11 +260,51 @@ export class openAIEngine {
   }
 
   /**
+   * A token fetch started before a turn asked for one, waiting to be handed to
+   * the first caller that does. Held as the promise rather than the token so the
+   * caller waits on the same fetch instead of starting a second one.
+   *
+   * @type {Promise<string|null> | null}
+   */
+  static #prefetchedToken = null;
+
+  /**
+   * Starts the token fetch ahead of the turn that needs it. fetchWithHistory
+   * awaits the token after the prompt has been assembled, which puts an
+   * FxAccounts round trip between the user's submit and the request; started
+   * while the user is still typing, it has resolved by then.
+   */
+  static prefetchFxAccountToken() {
+    // Replaces any unconsumed fetch rather than keeping it. Callers already
+    // rate limit to once per turn, so the only way one is still sitting here is
+    // that the turn it belonged to never sent - a user who typed and walked
+    // away. Keeping it would both block every later prefetch and eventually
+    // hand out a token fetched long ago.
+    openAIEngine.#prefetchedToken = openAIEngine.getFxAccountToken();
+  }
+
+  /**
+   * Drops a prefetched token. Called before the 401 retry path refetches, so a
+   * token that was already rejected cannot be handed out again.
+   */
+  static invalidatePrefetchedToken() {
+    openAIEngine.#prefetchedToken = null;
+  }
+
+  /**
    * Retrieves the Firefox account token
    *
    * @returns {Promise<string|null>}   The Firefox account token (string) or null
    */
   static async getFxAccountToken() {
+    // Consumed rather than cached: handing the same fetch to exactly one caller
+    // keeps this from becoming a token cache with its own expiry problem.
+    const prefetched = openAIEngine.#prefetchedToken;
+    if (prefetched) {
+      openAIEngine.#prefetchedToken = null;
+      return prefetched;
+    }
+
     try {
       const fxAccounts = lazy.getFxAccountsSingleton();
       return await fxAccounts.getOAuthToken({
@@ -414,6 +454,7 @@ export class openAIEngine {
       );
 
       const fxAccounts = lazy.getFxAccountsSingleton();
+      openAIEngine.invalidatePrefetchedToken();
       const oldToken = content.fxAccountToken;
       if (oldToken) {
         await fxAccounts.removeCachedOAuthToken({ token: oldToken });
@@ -512,6 +553,7 @@ export class openAIEngine {
       );
 
       const fxAccounts = lazy.getFxAccountsSingleton();
+      openAIEngine.invalidatePrefetchedToken();
       const oldToken = options.fxAccountToken;
       if (oldToken) {
         await fxAccounts.removeCachedOAuthToken({ token: oldToken });

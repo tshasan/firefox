@@ -886,6 +886,9 @@ export class AIWindow extends MozLitElement {
     }
     this.#pendingStreamMessage = null;
 
+    // A token fetched for a turn this window will now never send.
+    lazy.openAIEngine.invalidatePrefetchedToken();
+
     this.#abortController?.abort();
     this.#abortController = null;
 
@@ -1690,6 +1693,9 @@ export class AIWindow extends MozLitElement {
     }
     this.#hasWarmedChatEndpointThisTurn = true;
     lazy.openAIEngine.speculativeConnect(this.#selectedModelChoiceId);
+    // fetchWithHistory awaits the token after the prompt is assembled, so the
+    // FxAccounts round trip otherwise sits between submit and the request.
+    lazy.openAIEngine.prefetchFxAccountToken();
   }
 
   /**
