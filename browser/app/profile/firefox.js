@@ -2385,15 +2385,26 @@ pref("browser.smartwindow.prewarmEngines.enabled", true);
 pref("browser.smartwindow.speculativeConnect.chatEndpoint.enabled", true);
 
 // Smart Window: warm DNS/TCP/TLS for the top search result hosts before
-// get_page_content reads them (bug 2058756). Off until the privacy review and
-// the bot detection decision are settled.
-pref("browser.smartwindow.speculativeConnect.enabled", false);
+// get_page_content reads them (bug 2058756).
+//
+// Two things are still open and neither is settled by this being on: the privacy
+// review and the bot detection decision, and whether the warm is reused at all.
+// Unlike the chat endpoint above, this was only ever verified by observing that
+// a warm fired for the right hosts, which is exactly the evidence that hid a
+// mis-keyed warm for the chat endpoint. Confirm with nsIDashboard that the pool
+// holds one connection per host rather than two.
+pref("browser.smartwindow.speculativeConnect.enabled", true);
 pref("browser.smartwindow.speculativeConnect.maxHosts", 3);
 
 // Smart Window: run several parallel-safe tool calls from one round together,
-// instead of one tool call per round trip (bug 2058757). Off until an eval
-// confirms the endpoint and the models handle multi-call rounds.
-pref("browser.smartwindow.parallelToolCalls.enabled", false);
+// instead of one tool call per round trip (bug 2058757).
+//
+// On, but note it has never been observed running: across a full manual session
+// chat-tools-parallel fired zero times, because the model emitted more than one
+// tool call in a round exactly once and that round paired search_the_web, which
+// is deliberately not on the parallel-safe list. Enabling this does not make the
+// path exercised; an eval that provokes multi-call rounds still would.
+pref("browser.smartwindow.parallelToolCalls.enabled", true);
 
 // Smart Window Logging
 pref("browser.smartwindow.chatHistory.loglevel", "Error");

@@ -344,6 +344,8 @@ export const MemoryStore = {
   // Embeddings cache for semantic memory search
   embeddingsGenerator: null,
   memoryEmbeddingsCache: null,
+  /** @type {?Promise<void>} In-flight prewarm, shared by overlapping callers. */
+  prewarmInFlight: null,
   memoryCacheKey: null,
 
   /**
@@ -697,15 +699,27 @@ export const MemoryStore = {
    * @returns {Promise<void>}
    */
   async prewarmRelevantMemories() {
-    const memories = await this.getMemories({ includeSoftDeleted: false });
-    if (!memories.length) {
-      return;
-    }
-    if (!this.embeddingsGenerator) {
-      this.embeddingsGenerator = EmbeddingsGenerator.forGeneral();
-    }
-    await this.embeddingsGenerator.createEngineIfNotPresent();
-    await this.ensureMemoryEmbeddings(memories);
+    // Callers overlap - a window open can prewarm while another already is - and
+    // without this they each create a generator, the later one overwriting the
+    // earlier, and each drives its own engine creation for the same engine.
+    this.prewarmInFlight ??= (async () => {
+      try {
+        const memories = await this.getMemories({ includeSoftDeleted: false });
+        if (!memories.length) {
+          return;
+        }
+        if (!this.embeddingsGenerator) {
+          this.embeddingsGenerator = EmbeddingsGenerator.forGeneral();
+        }
+        await this.embeddingsGenerator.createEngineIfNotPresent();
+        await this.ensureMemoryEmbeddings(memories);
+      } finally {
+        // Cleared so a later window still retries after a failure, and so a
+        // changed memory set can be re-embedded.
+        this.prewarmInFlight = null;
+      }
+    })();
+    return this.prewarmInFlight;
   },
 
   /**
