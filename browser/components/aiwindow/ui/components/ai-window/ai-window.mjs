@@ -248,6 +248,7 @@ export class AIWindow extends MozLitElement {
   #hasMemories = false;
   #selectedModelChoiceId = null;
   #hasModelChoiceOverride = false;
+  #hasWarmedChatEndpointThisTurn = false;
 
   get #kitMention() {
     return this.shadowRoot?.querySelector("kit-mention");
@@ -570,6 +571,10 @@ export class AIWindow extends MozLitElement {
     super.connectedCallback();
     this.setAttribute("mode", this.mode);
     this.#loadAvailableModels();
+    // Window open is its own warm, deliberately not counted against the turn:
+    // the first keystroke may be much later, by which point keep-alive has
+    // closed this socket and the turn needs its own.
+    lazy.openAIEngine.speculativeConnect(this.#selectedModelChoiceId);
 
     this.ownerDocument.addEventListener("OpenConversation", this);
     this.ownerDocument.addEventListener(
@@ -1574,11 +1579,32 @@ export class AIWindow extends MozLitElement {
    * @private
    */
   #handleSmartbarInput = () => {
+    this.#speculativeConnectForTurn();
     this.#dispatchChromeEvent(
       "ai-window:smartbar-input",
       this.#getAIWindowEventOptions(this.#getSmartbarInputState())
     );
   };
+
+  /**
+   * Warms the connection to the chat endpoint for the turn being composed, at
+   * most once so a typed sentence opens one speculative connection rather than
+   * one per keystroke.
+   *
+   * Per turn rather than on a timer because the thing being recovered from is
+   * per turn: network.http.keep-alive.timeout closes the socket while the user
+   * reads the previous answer, so the next turn needs its own warm however long
+   * that reading took.
+   *
+   * @private
+   */
+  #speculativeConnectForTurn() {
+    if (this.#hasWarmedChatEndpointThisTurn) {
+      return;
+    }
+    this.#hasWarmedChatEndpointThisTurn = true;
+    lazy.openAIEngine.speculativeConnect(this.#selectedModelChoiceId);
+  }
 
   /**
    * Dispatches a TabStateEvent on the chrome window for the
@@ -2070,6 +2096,11 @@ export class AIWindow extends MozLitElement {
     this.showDisclaimer = true;
     this.#updateTabFavicon();
     this.#setBrowserContainerActiveState(true);
+
+    // The turn being sent consumes this turn's warm, so the next turn's first
+    // keystroke opens a fresh connection rather than trusting a socket that
+    // keep-alive may have closed while the user read this answer.
+    this.#hasWarmedChatEndpointThisTurn = false;
 
     this.#abortController?.abort();
     this.#abortController = new AbortController();

@@ -19,6 +19,23 @@ const lazy = XPCOMUtils.declareLazy({
 const APIKEY_PREF = "browser.smartwindow.apiKey";
 const ENDPOINT_PREF = "browser.smartwindow.endpoint";
 const CUSTOM_ENDPOINT_PREF = "browser.smartwindow.customEndpoint";
+const SPECULATIVE_CONNECT_PREF =
+  "browser.smartwindow.speculativeConnect.chatEndpoint.enabled";
+/**
+ * Passed as the speculative connection's notification callbacks. It answers no
+ * interfaces, but being non-null matters: nsIOService::SpeculativeConnectInternal
+ * refuses to warm anything when callbacks are absent and a proxy filter is
+ * registered, which is the case for anyone running a proxy extension. It does not
+ * affect the connection hash key, so the warmed connection still matches the
+ * request's own.
+ */
+const SPECULATIVE_CONNECT_CALLBACKS = {
+  QueryInterface: ChromeUtils.generateQI(["nsIInterfaceRequestor"]),
+  getInterface() {
+    throw Components.Exception("", Cr.NS_ERROR_NO_INTERFACE);
+  },
+};
+
 const CUSTOM_MODEL_CHOICE_ID = "0";
 const DEFAULT_ENGINE_ID = "smart-openai";
 
@@ -133,6 +150,68 @@ export class openAIEngine {
       };
     }
     return { baseURL: openAIEngine.endpoint, apiKey: "" };
+  }
+
+  /**
+   * Opens a speculative connection to the endpoint chat requests will use, so
+   * DNS, TCP and TLS setup overlaps the work that assembles the request instead
+   * of being serialized in front of the first byte. Also re-warms after an idle
+   * gap, since network.http.keep-alive.timeout closes the socket at 115s and a
+   * user who reads an answer before asking a follow-up would otherwise pay a
+   * fresh handshake.
+   *
+   * The real request is issued by a system-principal worker in the Inference
+   * process (OpenAIPipeline hands completionParams to the OpenAI client, which
+   * calls fetch), so it carries default origin attributes and is not anonymous.
+   * Both are part of the connection hash key (nsHttpConnectionInfo::
+   * BuildHashKey), so warming with anything else would populate a pool entry the
+   * real request cannot reuse and the warming would be pure overhead.
+   *
+   * @param {string} [modelChoiceId] - Selected model choice id.
+   */
+  static speculativeConnect(modelChoiceId) {
+    if (!Services.prefs.getBoolPref(SPECULATIVE_CONNECT_PREF, true)) {
+      return;
+    }
+
+    let baseURL;
+    try {
+      ({ baseURL } = openAIEngine.resolveEndpointConfig(modelChoiceId));
+    } catch {
+      // The custom model choice is selected but not configured, so there is no
+      // endpoint to warm and the turn is going to fail anyway.
+      return;
+    }
+
+    // Unlike the search result host warming, this host is the one the turn is
+    // about to contact regardless, so there is no scheme restriction to make:
+    // warming reveals nothing the request itself would not.
+    const parsed = URL.parse(baseURL);
+    if (!parsed) {
+      return;
+    }
+
+    const startTime = ChromeUtils.now();
+    try {
+      Services.io.speculativeConnectWithOriginAttributes(
+        parsed.URI,
+        {},
+        SPECULATIVE_CONNECT_CALLBACKS,
+        false
+      );
+    } catch (error) {
+      // The request will pay for its own connection setup. Logged rather than
+      // swallowed so a systemic failure is not indistinguishable from the pref
+      // being off.
+      console.warn(`speculativeConnect failed for ${parsed.host}`, error);
+      return;
+    }
+
+    ChromeUtils.addProfilerMarker(
+      "SmartWindow",
+      { startTime },
+      `WarmEndpointConnection(anonymous=false, ${parsed.host})`
+    );
   }
 
   /**

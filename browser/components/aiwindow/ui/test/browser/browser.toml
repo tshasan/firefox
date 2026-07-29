@@ -288,6 +288,8 @@ skip-if = [
 
 ["browser_smartwindow_smartbar_tab_state.js"]
 
+["browser_smartwindow_speculative_connect_chat_endpoint.js"]
+
 ["browser_smartwindow_switcher_telemetry.js"]
 
 ["browser_smartwindow_tab_move.js"]

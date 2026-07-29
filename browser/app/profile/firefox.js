@@ -2364,6 +2364,13 @@ pref("browser.smartwindow.worldcup.timeoutMs", 2000);
 pref("browser.smartwindow.searchQuery.endpointURL", "https://mlpa-prod-prod-mozilla.global.ssl.fastly.net/v1/search");
 pref("browser.smartwindow.searchQuery.apiKey", "");
 
+// Smart Window: warm DNS/TCP/TLS to the chat endpoint at window open and on the
+// first keystroke of each turn, so connection setup overlaps request assembly
+// instead of preceding the first byte. On by default: this is the endpoint the
+// turn is about to contact anyway, so it adds no privacy surface, unlike the
+// search result host warming below.
+pref("browser.smartwindow.speculativeConnect.chatEndpoint.enabled", true);
+
 // Smart Window: warm DNS/TCP/TLS for the top search result hosts before
 // get_page_content reads them (bug 2058756). Off until the privacy review and
 // the bot detection decision are settled.
