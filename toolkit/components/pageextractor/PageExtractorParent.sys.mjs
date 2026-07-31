@@ -93,11 +93,23 @@ export class PageExtractorParent extends JSWindowActorParent {
       );
     }
 
-    if (this.#isPDF()) {
-      return this.#getTextFromPDF(options);
-    }
+    const startTime = ChromeUtils.now();
+    const isPDF = this.#isPDF();
+    const result = isPDF
+      ? await this.#getTextFromPDF(options)
+      : await this.sendQuery("PageExtractorParent:GetText", options);
 
-    return this.sendQuery("PageExtractorParent:GetText", options);
+    // The extraction proper, with the page already loaded: everything before it
+    // is IO, everything in it is the child walking the DOM.
+    ChromeUtils.addProfilerMarker(
+      "PageExtractor",
+      { startTime },
+      `getText ${isPDF ? "pdf " : ""}extracted ${
+        result?.text?.length ?? 0
+      } characters`
+    );
+
+    return result;
   }
 
   /**
@@ -171,9 +183,16 @@ export class PageExtractorParent extends JSWindowActorParent {
         );
       }
     }
+    const headlessStartTime = ChromeUtils.now();
+
     // The hidden browser manager controls the lifetime of the hidden browser.
     return lazy.HiddenBrowserManager.withHiddenBrowser(
       async browser => {
+        ChromeUtils.addProfilerMarker(
+          "PageExtractor",
+          { startTime: headlessStartTime },
+          `headless browser created (${url.host})`
+        );
         if (anonymousFetch) {
           // The goal of these settings is to fetch the page without sending
           // any user data to the origin and without letting the visit affect
@@ -216,6 +235,12 @@ export class PageExtractorParent extends JSWindowActorParent {
         /** @type {PromiseWithResolvers<PageExtractorParent>} */
         let actorResolver = Promise.withResolvers();
 
+        // The navigation is network-bound and the ready wait is the page's own
+        // load; neither is extraction cost, and a slow headless read is usually
+        // one of these rather than PageExtractor itself.
+        let loadStartTime = ChromeUtils.now();
+        let committedTime = null;
+
         const locationChangeFlags = Ci.nsIWebProgress.NOTIFY_LOCATION;
         const onLocationChange = {
           QueryInterface: ChromeUtils.generateQI([
@@ -250,6 +275,13 @@ export class PageExtractorParent extends JSWindowActorParent {
               locationChangeFlags
             );
 
+            committedTime = ChromeUtils.now();
+            ChromeUtils.addProfilerMarker(
+              "PageExtractor",
+              { startTime: loadStartTime },
+              `headless navigation committed (${host})`
+            );
+
             /** @type {any} - This is reported as an `Element`, but it's a <browser> */
             const topBrowser = webProgress.browsingContext.topFrameElement;
 
@@ -261,6 +293,11 @@ export class PageExtractorParent extends JSWindowActorParent {
 
               actor.waitForPageReady().then(
                 () => {
+                  ChromeUtils.addProfilerMarker(
+                    "PageExtractor",
+                    { startTime: committedTime },
+                    `headless page ready (${host})`
+                  );
                   lazy.console.log("Headless PageExtractor is ready", url);
                   actorResolver.resolve(actor);
                 },
@@ -301,6 +338,7 @@ export class PageExtractorParent extends JSWindowActorParent {
             Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_HISTORY;
         }
 
+        loadStartTime = ChromeUtils.now();
         browser.loadURI(url.URI, loadURIOptions);
 
         // The load may never commit on the requested host: the network can

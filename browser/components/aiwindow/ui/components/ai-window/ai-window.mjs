@@ -2212,6 +2212,7 @@ export class AIWindow extends MozLitElement {
 
     const requestStart = ChromeUtils.now();
     let firstTokenTime = null;
+    let turnFailed = false;
     const onUpdate = (_e, message) => {
       if (message.role !== lazy.MESSAGE_ROLE.ASSISTANT) {
         return;
@@ -2271,18 +2272,13 @@ export class AIWindow extends MozLitElement {
         signal,
       });
 
-      ChromeUtils.addProfilerMarker(
-        "SmartWindow",
-        { startTime: requestStart },
-        "Total turnaround time"
-      );
-
       this.#sendModelResponseTelemetryEvent(
         null,
         this.#getModelRequestLatencyAndDuration(requestStart, firstTokenTime),
         { isRetry }
       );
     } catch (e) {
+      turnFailed = true;
       if (!signal.aborted) {
         this.showSearchingIndicator(false, null);
         this.#handleError(
@@ -2293,6 +2289,21 @@ export class AIWindow extends MozLitElement {
       }
       this.requestUpdate?.();
     } finally {
+      // Recorded here rather than after the await, so a turn that errors, or
+      // that the next message aborts on its way in, still reports how long it
+      // ran. Those are the turns whose duration is worth looking at.
+      let outcome = "";
+      if (signal.aborted) {
+        outcome = " (aborted)";
+      } else if (turnFailed) {
+        outcome = " (error)";
+      }
+      ChromeUtils.addProfilerMarker(
+        "SmartWindow",
+        { startTime: requestStart },
+        `Total turnaround time${outcome}`
+      );
+
       stopWatchingTabClose();
       if (this.#abortController?.signal === signal) {
         this.isGenerating = false;

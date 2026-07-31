@@ -406,6 +406,7 @@ export class ChatConversation extends Conversation {
         pendingToolCalls: [],
         fullResponseText: "",
         usage: null,
+        timing: null,
       };
     }
 
@@ -457,6 +458,7 @@ export class ChatConversation extends Conversation {
       pendingToolCalls: result.pendingToolCalls,
       fullResponseText: result.fullResponseText,
       usage: result.usage,
+      timing: result.timing,
     };
   }
 

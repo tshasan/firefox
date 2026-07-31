@@ -301,12 +301,18 @@ async function generateAnswer({
   signal,
   flowId = null,
 }) {
+  const buildStart = ChromeUtils.now();
   const [conversation, { prompt: rawPrompt }] = await Promise.all([
     lazy.buildConversation(MODEL_FEATURES.SEARCH_ANSWER_GENERATION, {
       flowId,
     }),
     lazy.loadPrompt(MODEL_FEATURES.SEARCH_ANSWER_GENERATION),
   ]);
+  ChromeUtils.addProfilerMarker(
+    "SmartWindow",
+    { startTime: buildStart },
+    "Tool:search_the_web:build-prompt"
+  );
 
   conversation.setSystemMessage(renderPrompt(rawPrompt, {}));
   conversation.addUserMessage(
@@ -320,7 +326,9 @@ async function generateAnswer({
   );
 
   let reads = 0;
+  let round = 0;
   while (reads < MAX_READ_ROUNDS && readableRemaining() > 0) {
+    const roundStart = ChromeUtils.now();
     // Object content so the streaming accumulator can append to `body`.
     const assistantMessage = conversation.addAssistantMessage({ body: "" });
     const { pendingToolCalls } = await conversation.receiveResponse(
@@ -343,14 +351,33 @@ async function generateAnswer({
     // A round that requests no read must be the final answer instead. When its
     // body parses as an object it is returned as-is and the schema turn never
     // runs; anything else falls through to the schema turn below.
+    let finalAnswer = null;
     if (!pageReadCalls.length) {
       const candidate = parseAndExtractJSON(
         { finalOutput: assistantMessage.content?.body ?? "" },
         null
       );
       if (candidate && typeof candidate === "object") {
-        return candidate;
+        finalAnswer = candidate;
       }
+    }
+
+    // The read count says whether the round paid for itself: a round that
+    // requests no read is only worth its round trip if it answered, which is
+    // what final-json records.
+    ChromeUtils.addProfilerMarker(
+      "SmartWindow",
+      { startTime: roundStart },
+      `Tool:search_the_web:round(#${round} read-calls=${pageReadCalls.length}` +
+        ` final-json=${finalAnswer ? "yes" : "no"})`
+    );
+    round++;
+
+    if (finalAnswer) {
+      return finalAnswer;
+    }
+
+    if (!pageReadCalls.length) {
       break;
     }
 
@@ -409,11 +436,17 @@ async function generateAnswer({
   if (signal?.aborted) {
     throw new DOMException("Aborted", "AbortError");
   }
+  const schemaStart = ChromeUtils.now();
   const response = await conversation.run({
     tool_choice: "none",
     tools: [],
     fxAccountToken,
   });
+  ChromeUtils.addProfilerMarker(
+    "SmartWindow",
+    { startTime: schemaStart },
+    "Tool:search_the_web:schema-turn"
+  );
   return parseAndExtractJSON(response, null);
 }
 
@@ -473,6 +506,7 @@ export async function runSearchTheWeb(toolParams, conversation, signal) {
     typeof toolParams?.context === "string" ? toolParams.context : "";
 
   let results;
+  const retrievalStart = ChromeUtils.now();
   try {
     const provider = new ExaSearchProvider();
     const response = await provider.search(query.trim(), {
@@ -482,6 +516,12 @@ export async function runSearchTheWeb(toolParams, conversation, signal) {
   } catch (e) {
     console.error("[SearchWorkflow] retrieval failed:", e);
     return failure([], [], e.message);
+  } finally {
+    ChromeUtils.addProfilerMarker(
+      "SmartWindow",
+      { startTime: retrievalStart },
+      `Tool:search_the_web:retrieval(results=${results?.length ?? 0})`
+    );
   }
 
   results = results.filter(item => isValidHttpUrl(item?.url));
@@ -574,7 +614,13 @@ export async function runSearchTheWeb(toolParams, conversation, signal) {
       }
     };
 
+    const batchStart = ChromeUtils.now();
     const perUrl = await Promise.all(fresh.map(readOne));
+    ChromeUtils.addProfilerMarker(
+      "SmartWindow",
+      { startTime: batchStart },
+      `Tool:search_the_web:read-batch(urls=${fresh.length})`
+    );
     return perUrl.flat();
   };
 
@@ -596,6 +642,14 @@ export async function runSearchTheWeb(toolParams, conversation, signal) {
   }
 
   const validated = validateSearchAnswer(parsed);
+
+  ChromeUtils.addProfilerMarker(
+    "SmartWindow",
+    {},
+    `Tool:search_the_web:result(searched=${searchedUrls.length}` +
+      ` read=${readUrls.length} could_answer=${validated.could_answer})`
+  );
+
   lazy.console.log("[Tool] searchTheWeb", {
     query,
     searched: searchedUrls.length,

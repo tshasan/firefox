@@ -1653,6 +1653,18 @@ export class MLEngine {
       transferables
     );
 
+    // Validation and the structured clone of the request both happen above, so
+    // this span is the parent-side cost of getting the request out the door. It
+    // scales with the transcript and is otherwise hidden inside the whole-run
+    // span, where it reads as endpoint latency.
+    const dispatchTime = ChromeUtils.now();
+    ChromeUtils.addProfilerMarker(
+      "MLEngineParent",
+      { startTime },
+      `runWithGenerator dispatched request` +
+        ` (${this.pipelineOptions.backend} ${this.pipelineOptions.modelId})`
+    );
+
     /**
      * @param {number} delay
      */
@@ -1671,6 +1683,10 @@ export class MLEngine {
     let generatedChunkCount = 0;
     let interChunkTimeTotal = 0;
 
+    // Every chunk, prompt or generated, so the wait for the stream to produce
+    // anything at all is separable from the wait for the first output token.
+    let firstAnyChunkTime = null;
+
     let chunkPromise = responseChunkResolvers.getAndAdvanceChunkPromise();
     let chunkStartTime = ChromeUtils.now();
 
@@ -1684,11 +1700,27 @@ export class MLEngine {
         lazy.console.debug(
           `Chunk received ${lazy.stringifyForLog(chunk.metadata)}`
         );
+        const now = ChromeUtils.now();
         tokenCount += chunk.metadata.tokens?.length ?? 0;
         characterCount += chunk.metadata.text?.length ?? 0;
 
+        if (firstAnyChunkTime === null) {
+          firstAnyChunkTime = now;
+          ChromeUtils.addProfilerMarker(
+            "MLEngineParent",
+            { startTime: dispatchTime },
+            `runWithGenerator waited for first chunk` +
+              `${chunk.metadata.isPrompt ? " (prompt)" : ""}`
+          );
+          // Later chunks span the previous chunk's arrival, so their span is
+          // the cadence. The first chunk has no predecessor and would span the
+          // dispatch instead, restating the wait just marked above and reading
+          // as a second spent generating three characters. Start it where the
+          // chunk arrived, so it covers only the delivery to the consumer.
+          chunkStartTime = now;
+        }
+
         if (!chunk.metadata.isPrompt) {
-          const now = ChromeUtils.now();
           if (firstChunkTime === null) {
             firstChunkTime = now;
           } else {
@@ -1755,8 +1787,32 @@ export class MLEngine {
       }
     }
 
+    // A marker's span ends when it is added, so the decode span has to be
+    // recorded here rather than after the completion await below.
+    if (firstChunkTime !== null) {
+      const cadence =
+        generatedChunkCount > 1
+          ? `, avg ${(interChunkTimeTotal / (generatedChunkCount - 1)).toFixed(
+              1
+            )}ms/chunk`
+          : "";
+      ChromeUtils.addProfilerMarker(
+        "MLEngineParent",
+        { startTime: firstChunkTime },
+        `runWithGenerator decoded ${generatedChunkCount} chunks${cadence}`
+      );
+    }
+
+    const loopEndTime = ChromeUtils.now();
+
     // Wait for the engine to fully complete before exiting
     const result = await completionPromise;
+
+    ChromeUtils.addProfilerMarker(
+      "MLEngineParent",
+      { startTime: loopEndTime },
+      "runWithGenerator waited for engine completion"
+    );
 
     // Tokens may not be available.
     let markerText;
@@ -1768,10 +1824,22 @@ export class MLEngine {
       markerText = "an empty response";
     }
 
+    const timingText = [
+      firstAnyChunkTime === null
+        ? null
+        : `ttfc=${Math.round(firstAnyChunkTime - startTime)}ms`,
+      firstChunkTime === null
+        ? null
+        : `decode=${Math.round(lastChunkTime - firstChunkTime)}ms`,
+      `chunks=${generatedChunkCount}`,
+    ]
+      .filter(Boolean)
+      .join(" ");
+
     ChromeUtils.addProfilerMarker(
       "MLEngineParent",
       { startTime },
-      `runWithGenerator generated ${markerText}` +
+      `runWithGenerator generated ${markerText} (${timingText})` +
         ` (${this.pipelineOptions.backend} ${this.pipelineOptions.modelId})`
     );
 

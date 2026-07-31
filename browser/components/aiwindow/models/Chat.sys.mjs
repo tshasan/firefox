@@ -242,6 +242,56 @@ function classifyStreamingError(err) {
   }
 }
 
+/**
+ * Marker detail for one server round. A round is only interpretable next to
+ * what it produced: one that ends in a tool call is a prefill-dominated round
+ * the user never sees, and a slow round with a cold prompt cache is a different
+ * problem from a slow round with a warm one.
+ *
+ * @param {object} details
+ * @param {number} details.round - Zero-based round index within the turn.
+ * @param {?ToolCall[]} details.pendingToolCalls - Tool calls the round requested.
+ * @param {?object} details.timing - `receiveResponse` timing; null if the stream threw.
+ * @param {number} details.textLength - Characters of assistant text this round.
+ * @param {?object} details.usage - The round's reported token usage.
+ * @returns {string}
+ */
+function serverRoundMarkerDetail({
+  round,
+  pendingToolCalls,
+  timing,
+  textLength,
+  usage,
+}) {
+  if (!timing) {
+    return `round=${round} incomplete`;
+  }
+
+  const outcome = pendingToolCalls?.length
+    ? `tools=${pendingToolCalls
+        .map(toolCall => toolCall.function?.name ?? "?")
+        .join(",")}`
+    : "text";
+
+  const elapsed = time => `${Math.round(time - timing.drainStart)}ms`;
+
+  return [
+    `round=${round}`,
+    outcome,
+    timing.firstChunkTime ? `ttfc=${elapsed(timing.firstChunkTime)}` : null,
+    timing.firstTextTime ? `ttft=${elapsed(timing.firstTextTime)}` : null,
+    `chunks=${timing.chunkCount}`,
+    `chars=${textLength}`,
+    usage
+      ? `cached=${usage.prompt_tokens_details?.cached_tokens ?? 0}/prompt=${
+          usage.prompt_tokens ?? 0
+        }`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
 function logConversationStream(turn, action, data = null, extraText = "") {
   try {
     let prefix = `[Chat][Turn ${turn}][${action.padEnd(10)}]`;
@@ -318,7 +368,13 @@ Object.assign(Chat, {
     const searchExecuted = conversation._searchExecutedTurn === currentTurn;
 
     const streamModelResponse = () => {
+      const snapshotStart = ChromeUtils.now();
       const snapshot = conversation.compactChatCompletions();
+      ChromeUtils.addProfilerMarker(
+        "SmartWindow",
+        { startTime: snapshotStart },
+        `chat-serialize(messages=${snapshot.length})`
+      );
 
       lazy.console.log(
         `Request (${conversation.securityProperties.getLogText()})`,
@@ -339,14 +395,15 @@ Object.assign(Chat, {
       });
     };
 
-    while (true) {
+    for (let round = 0; ; round++) {
       /** @type {ToolCall[] | null} */
       let pendingToolCalls = null;
+      let streamTiming = null;
 
       ChromeUtils.addProfilerMarker(
         "SmartWindow",
         {},
-        "chat-server-request-start"
+        `chat-server-request-start(round=${round})`
       );
       const turnStart = ChromeUtils.now();
       try {
@@ -356,6 +413,7 @@ Object.assign(Chat, {
         );
         fullResponseText = response.fullResponseText;
         pendingToolCalls = response.pendingToolCalls;
+        streamTiming = response.timing;
 
         // Debug logging: Record the raw text and requested tool calls from the model
         logConversationStream(currentTurn, "CHAT RECV", {
@@ -386,7 +444,13 @@ Object.assign(Chat, {
         ChromeUtils.addProfilerMarker(
           "SmartWindow",
           { startTime: turnStart },
-          "ServerE2E"
+          `ServerE2E(${serverRoundMarkerDetail({
+            round,
+            pendingToolCalls,
+            timing: streamTiming,
+            textLength: fullResponseText.length,
+            usage: this.lastUsage,
+          })})`
         );
       }
 

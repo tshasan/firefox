@@ -371,7 +371,7 @@ export class Conversation {
    *
    * @param {AsyncIterable} stream
    * @param {Message} currentMessage
-   * @returns {Promise<{pendingToolCalls, fullResponseText, usage, currentMessage}>}
+   * @returns {Promise<{pendingToolCalls, fullResponseText, usage, currentMessage, timing}>}
    */
   async receiveResponse(stream, currentMessage) {
     const parserState = createParserState();
@@ -379,9 +379,33 @@ export class Conversation {
     let fullResponseText = "";
     let usage = null;
 
+    // Measured here rather than around the generator so the numbers are the
+    // consumer's: a chunk counts as arrived once this loop can act on it.
+    const drainStart = ChromeUtils.now();
+    let firstChunkTime = null;
+    let firstTextTime = null;
+    let chunkCount = 0;
+
     for await (const chunk of stream) {
+      chunkCount++;
+      if (firstChunkTime === null) {
+        firstChunkTime = ChromeUtils.now();
+        ChromeUtils.addProfilerMarker(
+          "SmartWindow",
+          { startTime: drainStart },
+          "chat-stream-first-chunk"
+        );
+      }
       usage = chunk?.usage;
       if (chunk.text) {
+        if (firstTextTime === null) {
+          firstTextTime = ChromeUtils.now();
+          ChromeUtils.addProfilerMarker(
+            "SmartWindow",
+            { startTime: drainStart },
+            "chat-stream-first-text"
+          );
+        }
         fullResponseText += chunk.text;
         this.handleChunk(chunk.text, currentMessage, parserState);
       }
@@ -396,7 +420,13 @@ export class Conversation {
         (currentMessage.content.body ?? "") + remainder;
     }
 
-    return { pendingToolCalls, fullResponseText, usage, currentMessage };
+    return {
+      pendingToolCalls,
+      fullResponseText,
+      usage,
+      currentMessage,
+      timing: { drainStart, firstChunkTime, firstTextTime, chunkCount },
+    };
   }
 
   /**

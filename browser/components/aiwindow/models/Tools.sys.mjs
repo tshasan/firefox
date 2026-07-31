@@ -1002,6 +1002,15 @@ export class GetPageContent {
         return `Cannot access content from the following webpage:\n - Title: ${sanitizeUntrustedContent(tab.label)}\n - URL: ${url}.`;
       }
 
+      // Which route a URL took decides what its span can even contain: a tab
+      // read is extraction only, while a headless read pays for a browser, a
+      // navigation and a page load first.
+      ChromeUtils.addProfilerMarker(
+        "SmartWindow",
+        {},
+        `get_page_content route=tab(${url})`
+      );
+
       // Extract page content using PageExtractor
       const pageExtractor =
         await currentWindowContext.getActor("PageExtractor");
@@ -1028,6 +1037,11 @@ export class GetPageContent {
       conversation.securityProperties.privateData
     ) {
       if (conversation.serpUrlsForAnonymousFetch.has(url)) {
+        ChromeUtils.addProfilerMarker(
+          "SmartWindow",
+          {},
+          `get_page_content route=headless-anonymous(${url})`
+        );
         return PageExtractorParent.getHeadlessExtractor({
           urlString: url,
           callback: pageExtractor =>
@@ -1046,6 +1060,12 @@ export class GetPageContent {
         "in the conversation."
       );
     }
+
+    ChromeUtils.addProfilerMarker(
+      "SmartWindow",
+      {},
+      `get_page_content route=headless(${url})`
+    );
 
     return PageExtractorParent.getHeadlessExtractor({
       urlString: url,
