@@ -13,7 +13,10 @@ ALLOWED_HOSTS = [
     "content-signature-2.cdn.mozilla.net",
     # The models hub is a HuggingFace compatible model hub for downloading models.
     "model-hub.mozilla.org",
-    # The MLPA server is the front for the mozilla-managed LLM service.
+    # The MLPA server is the front for the mozilla-managed LLM service. Desktop
+    # Smart Window uses the freetls domain because it is the one that negotiates
+    # h2; the global.ssl domain is still what Android and the eval harness use.
+    "mlpa-prod-prod-mozilla.freetls.fastly.net",
     "mlpa-prod-prod-mozilla.global.ssl.fastly.net",
     "mlpa-nonprod-stage-mozilla.global.ssl.fastly.net",
 ]

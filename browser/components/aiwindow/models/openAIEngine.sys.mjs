@@ -23,10 +23,12 @@ const CUSTOM_MODEL_CHOICE_ID = "0";
 const DEFAULT_ENGINE_ID = "smart-openai";
 
 /**
- * The default endpoint used for preset models
+ * The default endpoint used for preset models.
+ *
+ * The freetls Fastly domain, not global.ssl, because only freetls negotiates
+ * h2. See the pref in firefox.js for what that is and isn't worth.
  */
-const DEFAULT_ENDPOINT =
-  "https://mlpa-prod-prod-mozilla.global.ssl.fastly.net/v1";
+const DEFAULT_ENDPOINT = "https://mlpa-prod-prod-mozilla.freetls.fastly.net/v1";
 
 /**
  * Transport for AI Window LLM calls against an OpenAI-style backend.

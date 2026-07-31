@@ -60,6 +60,7 @@ def test_ml_services_allowlist_contains_all_expected_hosts():
         "firefox-settings-attachments.cdn.mozilla.net",
         "content-signature-2.cdn.mozilla.net",
         "model-hub.mozilla.org",
+        "mlpa-prod-prod-mozilla.freetls.fastly.net",
         "mlpa-prod-prod-mozilla.global.ssl.fastly.net",
     ]
 

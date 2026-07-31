@@ -2326,8 +2326,17 @@ pref("browser.ml.pageAssist.enabled", false);
 
 // Smart Window Feature
 pref("browser.smartwindow.enabled", false);
-// Default endpoint for preset models
-pref("browser.smartwindow.endpoint", "https://mlpa-prod-prod-mozilla.global.ssl.fastly.net/v1");
+// Default endpoint for preset models.
+//
+// MLPA is reachable under two Fastly shared-certificate domains, and only the
+// freetls one negotiates h2: global.ssl.fastly.net ALPNs down to http/1.1.
+// What that buys is not multiplexing - a turn is sequential, and at the one or
+// two concurrent requests it actually makes, the two protocols measure the
+// same. It is that the chat pipeline cancels every tool-calling round
+// mid-response, and http/1.1 cannot cancel a response without losing the
+// connection, where h2 resets the stream and keeps the session. See
+// LATENCY-EXPERIMENT.md.
+pref("browser.smartwindow.endpoint", "https://mlpa-prod-prod-mozilla.freetls.fastly.net/v1");
 pref("browser.smartwindow.memories.generateFromHistory", true);
 pref("browser.smartwindow.memories.generateFromConversation", true);
 pref("browser.smartwindow.memories.hasSeenMemories", false);
@@ -2362,7 +2371,7 @@ pref("browser.smartwindow.worldcup.endpointURL", "https://merino.services.mozill
 pref("browser.smartwindow.worldcup.timeoutMs", 2000);
 
 // Smart Window: Exa search endpoint, used by the search_the_web agentic flow (bug 2037948)
-pref("browser.smartwindow.searchQuery.endpointURL", "https://mlpa-prod-prod-mozilla.global.ssl.fastly.net/v1/search");
+pref("browser.smartwindow.searchQuery.endpointURL", "https://mlpa-prod-prod-mozilla.freetls.fastly.net/v1/search");
 pref("browser.smartwindow.searchQuery.apiKey", "");
 
 // Smart Window: deliver streamed assistant text to the chat content document at
