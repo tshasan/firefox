@@ -98,7 +98,9 @@ const GET_PAGE_CONTENT_TOOL = {
     name: GET_PAGE_CONTENT,
     description:
       "Read the full text of one or more web pages from the provided search " +
-      "results. Reference results by their id (for example result_1).",
+      "results. Reference results by their id (for example result_1). Every " +
+      "call costs a round trip, so request all the results you want in one " +
+      "call instead of reading them one at a time.",
     parameters: {
       type: "object",
       properties: {
@@ -110,7 +112,7 @@ const GET_PAGE_CONTENT_TOOL = {
               "A result id shown in the search results, for example result_1.",
           },
           minItems: 1,
-          description: "List of result ids to read.",
+          description: "Every result id to read, in a single call.",
         },
       },
       required: ["result_ids"],
@@ -169,8 +171,14 @@ function isValidHttpUrl(url) {
 
 /**
  * Renders the user message handed to the model: the query, optional caller
- * context, the current date for freshness judgements, and the formatted
- * search results (each tagged with a result id).
+ * context, the current date for freshness judgements, the formatted search
+ * results (each tagged with a result id), and the per-round contract.
+ *
+ * The contract lives here rather than in the system prompt because the system
+ * prompt is a Remote Settings record that is not editable in-tree, and because
+ * it is about the locally-defined GET_PAGE_CONTENT_TOOL. generateAnswer only
+ * skips the forced-schema turn when the model honours it, so a remote prompt
+ * revision that contradicts it costs a round trip but stays correct.
  *
  * @param {object} params
  * @param {string} params.query
@@ -195,6 +203,13 @@ function buildUserMessage({ query, context, nowISO, results }) {
       lines.push(`   ${snippet}`);
     }
   });
+  lines.push(
+    "",
+    "On every turn, do exactly one of these: call get_page_content for all " +
+      "the results you still need to read, or, if you have read enough, " +
+      "output only the final JSON object described in your instructions and " +
+      "nothing else. Never write prose."
+  );
   return lines.join("\n");
 }
 
@@ -236,13 +251,29 @@ export function validateSearchAnswer(parsed) {
 
 /**
  * Generates the grounded answer on the pinned answer-generation model. Runs an
- * on-demand page-read loop (page reads use tool-calling), then forces the
- * structured-output schema on a final, tool-free turn.
+ * on-demand page-read loop (page reads use tool-calling), and falls back to
+ * forcing the structured-output schema on a final, tool-free turn.
  *
  * A forced json_schema response and tool-calling cannot coexist in one turn —
  * with the schema forced the model must emit the final JSON and can't issue a
- * get_page_content call — so reads happen with tools and the schema is applied
- * only on the final answer turn.
+ * get_page_content call — so reads happen with tools and the schema can only
+ * be applied on a separate answer turn.
+ *
+ * That extra turn is avoided when it is avoidable: buildUserMessage tells the
+ * model that a turn which does not call get_page_content must instead be the
+ * final JSON object, so a round that stops reading and parses as JSON is the
+ * answer and the schema turn is skipped. The schema turn remains the fallback
+ * for a round that emits prose (or nothing usable) instead, and for the loop
+ * exits that leave no candidate at all — hitting MAX_READ_ROUNDS or spending
+ * the page budget, where the last round did request reads.
+ *
+ * The loop also stops as soon as no further read could return content, rather
+ * than running until the model declines to read. Offering get_page_content when
+ * the page budget is spent (or every result has already been read) costs a full
+ * round trip on the whole transcript to obtain a request readPage can only
+ * refuse, and the tool-free turn that used to follow it re-generated an answer
+ * the forced-schema turn then produced again. Both are round trips that cannot
+ * change the outcome, so the loop exits straight into the schema turn.
  *
  * @param {object} params
  * @param {string} params.query
@@ -252,6 +283,8 @@ export function validateSearchAnswer(parsed) {
  * @param {string} params.fxAccountToken
  * @param {(urls: string[]) => Promise<string[]>} params.readPage - Executes a
  *   page read and returns the extracted text blocks.
+ * @param {() => number} params.readableRemaining - Number of results that could
+ *   still be read: the unspent page budget bounded by the results not yet read.
  * @param {AbortSignal} [params.signal]
  * @param {string|null} [params.flowId]
  * @returns {Promise<object|null>} The parsed model output, or null when the
@@ -264,6 +297,7 @@ async function generateAnswer({
   results,
   fxAccountToken,
   readPage,
+  readableRemaining,
   signal,
   flowId = null,
 }) {
@@ -286,8 +320,7 @@ async function generateAnswer({
   );
 
   let reads = 0;
-  while (true) {
-    const allowReads = reads < MAX_READ_ROUNDS;
+  while (reads < MAX_READ_ROUNDS && readableRemaining() > 0) {
     // Object content so the streaming accumulator can append to `body`.
     const assistantMessage = conversation.addAssistantMessage({ body: "" });
     const { pendingToolCalls } = await conversation.receiveResponse(
@@ -295,21 +328,29 @@ async function generateAnswer({
         streamOptions: { enabled: true },
         fxAccountToken,
         chatId: conversation.id,
-        tool_choice: allowReads ? "auto" : "none",
-        tools: allowReads ? [GET_PAGE_CONTENT_TOOL] : [],
+        tool_choice: "auto",
+        tools: [GET_PAGE_CONTENT_TOOL],
         signal,
       }),
       assistantMessage
     );
 
     const pageReadCalls =
-      allowReads && pendingToolCalls
-        ? pendingToolCalls.filter(
-            call => call.function?.name === GET_PAGE_CONTENT
-          )
-        : [];
+      pendingToolCalls?.filter(
+        call => call.function?.name === GET_PAGE_CONTENT
+      ) ?? [];
 
+    // A round that requests no read must be the final answer instead. When its
+    // body parses as an object it is returned as-is and the schema turn never
+    // runs; anything else falls through to the schema turn below.
     if (!pageReadCalls.length) {
+      const candidate = parseAndExtractJSON(
+        { finalOutput: assistantMessage.content?.body ?? "" },
+        null
+      );
+      if (candidate && typeof candidate === "object") {
+        return candidate;
+      }
       break;
     }
 
@@ -328,7 +369,12 @@ async function generateAnswer({
       },
     };
 
-    for (const call of pageReadCalls) {
+    // Start every call's read before awaiting any of them so several tool calls
+    // in one round overlap instead of queueing. `map` invokes readPage
+    // synchronously and in tool-call order, and readPage claims its share of
+    // the page budget synchronously, so the earlier calls still get first claim
+    // on it and the budget cannot be over-spent by the overlap.
+    const pendingReads = pageReadCalls.map(call => {
       let ids = [];
       try {
         ids = JSON.parse(call.function.arguments || "{}").result_ids || [];
@@ -338,13 +384,18 @@ async function generateAnswer({
       const urls = (Array.isArray(ids) ? ids : [])
         .map(id => idToUrl.get(id))
         .filter(Boolean);
-      const texts = await readPage(urls);
+      return readPage(urls);
+    });
+    const readTexts = await Promise.all(pendingReads);
+
+    pageReadCalls.forEach((call, index) => {
+      const texts = readTexts[index];
       conversation.addToolMessage({
         tool_call_id: call.id,
         content: Array.isArray(texts) ? texts.join("\n\n") : String(texts),
         name: call.function.name,
       });
-    }
+    });
     reads++;
   }
 
@@ -452,23 +503,41 @@ export async function runSearchTheWeb(toolParams, conversation, signal) {
   const readUrls = [];
   const readSet = new Set();
 
-  const readPage = async requestedUrls => {
+  // Results a further read could still return content for. Zero means every
+  // remaining request would be refused, so there is nothing to be gained by
+  // offering the read tool for another round.
+  const readableRemaining = () =>
+    Math.min(MAX_PAGES - readUrls.length, fetchableSet.size - readSet.size);
+
+  // Claims the page budget for `requestedUrls` and returns the URLs the caller
+  // may then fetch. Deliberately synchronous and self-contained: the check
+  // against MAX_PAGES and the mutation of readUrls/readSet must not be split by
+  // an await, or concurrent readPage() calls could interleave between the two
+  // and read more than MAX_PAGES pages. Do not make this async.
+  const claimPages = requestedUrls => {
     const remaining = MAX_PAGES - readUrls.length;
     if (remaining <= 0) {
-      return ["Page read limit reached. Answer using what you have gathered."];
+      return [];
     }
     const fresh = requestedUrls
       .filter(url => fetchableSet.has(url) && !readSet.has(url))
       .slice(0, remaining);
-    if (!fresh.length) {
-      return [
-        "No further readable pages are available. Answer using what you have gathered.",
-      ];
-    }
     fresh.forEach(url => {
       readSet.add(url);
       readUrls.push(url);
     });
+    return fresh;
+  };
+
+  const readPage = async requestedUrls => {
+    const fresh = claimPages(requestedUrls);
+    if (!fresh.length) {
+      return [
+        readUrls.length >= MAX_PAGES
+          ? "Page read limit reached. Answer using what you have gathered."
+          : "No further readable pages are available. Answer using what you have gathered.",
+      ];
+    }
 
     const readTimeoutMs = Services.prefs.getIntPref(
       READ_TIMEOUT_PREF,
@@ -518,6 +587,7 @@ export async function runSearchTheWeb(toolParams, conversation, signal) {
       results,
       fxAccountToken: await openAIEngine.getFxAccountToken(),
       readPage,
+      readableRemaining,
       signal,
     });
   } catch (e) {

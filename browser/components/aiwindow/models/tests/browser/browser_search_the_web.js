@@ -84,6 +84,52 @@ function serveResultPages(bodies) {
   return { urls, requestCounts, server };
 }
 
+/**
+ * Serve result pages that hold their response open until the test releases
+ * them, so a test can observe how many page reads are in flight at once.
+ *
+ * @param {string[]} bodies - HTML body for each result page.
+ * @returns {{urls: string[], requestCounts: number[], pendingCount: () => number,
+ *   releaseAll: () => void, server: object}} The page URLs, per-page request
+ *   counts, the number of reads currently held open, a release callback, and
+ *   the server.
+ */
+function serveGatedResultPages(bodies) {
+  const server = new HttpServer();
+  const requestCounts = bodies.map(() => 0);
+  const pending = [];
+  const paths = bodies.map((body, index) => {
+    const path = `/gated-${index}.html`;
+    server.registerPathHandler(path, (_request, response) => {
+      requestCounts[index]++;
+      response.setHeader("Content-Type", "text/html");
+      response.processAsync();
+      pending.push(() => {
+        response.write(body);
+        response.finish();
+      });
+    });
+    return path;
+  });
+  server.start(-1);
+  const { primaryHost, primaryPort } = server.identity;
+  const urls = paths.map(
+    // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+    path => `http://${primaryHost}:${primaryPort}${path}`
+  );
+  return {
+    urls,
+    requestCounts,
+    pendingCount: () => pending.length,
+    releaseAll: () => {
+      for (const release of pending.splice(0)) {
+        release();
+      }
+    },
+    server,
+  };
+}
+
 add_task(async function test_search_the_web_end_to_end() {
   const query = "What is the featured widget's price?";
   const pageContent = "The featured widget is on sale for nine dollars today.";
@@ -183,15 +229,8 @@ add_task(async function test_search_the_web_end_to_end() {
       ],
     });
 
-    const pageContentTurn = await mockEngineManager.captureRequest({
-      purpose: PURPOSES.CHAT,
-    });
-    Assert.ok(
-      JSON.stringify(pageContentTurn.request.args).includes(pageContent),
-      "The next model request includes content extracted from the result page"
-    );
-    pageContentTurn.respond("The page contains enough information to answer.");
-
+    // The one result has been read, so no further read could return content and
+    // the flow goes straight to the forced-schema turn.
     const answerTurn = await mockEngineManager.captureRequest({
       purpose: PURPOSES.CHAT,
     });
@@ -204,6 +243,10 @@ add_task(async function test_search_the_web_end_to_end() {
       answerTurn.request.tools,
       [],
       "No tools are offered during final generation"
+    );
+    Assert.ok(
+      JSON.stringify(answerTurn.request.args).includes(pageContent),
+      "The final generation carries the content extracted from the result page"
     );
     const expectedAnswer = {
       answer: "The widget is nine dollars.",
@@ -349,12 +392,8 @@ add_task(async function test_search_the_web_reads_result_pages_up_to_limit() {
       },
     ]);
 
-    // Second turn: no further reads, so the loop ends.
-    (
-      await mockEngineManager.captureRequest({ purpose: PURPOSES.CHAT })
-    ).respond("");
-
-    // Final turn: structured answer.
+    // The page budget is spent, so the loop ends and the next turn is the
+    // structured answer.
     (
       await mockEngineManager.captureRequest({ purpose: PURPOSES.CHAT })
     ).respond(
@@ -391,6 +430,401 @@ add_task(async function test_search_the_web_reads_result_pages_up_to_limit() {
     mockEngineManager.assertAllRequestsHandled();
     mockSearchManager.assertAllRequestsHandled();
   } finally {
+    mockEngineManager.rejectAllRequests();
+    mockSearchManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
+    mockSearchManager.cleanupMocks();
+    await SpecialPowers.popPrefEnv();
+    await new Promise(resolve => pagesServer.stop(resolve));
+  }
+});
+
+add_task(async function test_search_the_web_spends_no_turn_on_refused_reads() {
+  // Once the page budget is spent, offering get_page_content again can only
+  // produce a request readPage refuses, so the flow must not spend a model
+  // round trip on it. Four results are served and the model reads three in one
+  // call, exhausting MAX_PAGES while unread results remain — the state where
+  // the old code burned two further round trips (one to collect a read request
+  // it then refused, one to write prose that the schema turn rewrote).
+  //
+  // The test answers exactly two turns. A regression that reintroduces either
+  // round trip fails here: the extra request either leaves the flow waiting for
+  // a response this test never gives (timeout), or shows up unhandled in
+  // assertAllRequestsHandled().
+  const bodies = [0, 1, 2, 3].map(
+    index =>
+      `<!DOCTYPE html><html><head><meta charset="utf-8" /><title>Page ${index}</title></head>` +
+      `<body><article><p>Body of result page ${index}.</p></article></body></html>`
+  );
+  const { urls, server: pagesServer } = serveResultPages(bodies);
+  const results = urls.map((url, index) => ({
+    title: `Page ${index}`,
+    url,
+    snippet: `snippet ${index}`,
+  }));
+  await pushSearchPrefs();
+
+  const mockEngineManager = new MockEngineManager();
+  const mockSearchManager = new MockSearchManager();
+  const conversation = new ChatConversation({
+    pageUrl: new URL("https://example.com"),
+    pageMeta: {},
+  });
+
+  try {
+    const runPromise = runSearchTheWeb({ query: "pages" }, conversation);
+    (await mockSearchManager.captureRequest()).respond({ results });
+
+    // Turn 1: reads are still possible, so the tool is offered.
+    const readTurn = await mockEngineManager.captureRequest({
+      purpose: PURPOSES.CHAT,
+    });
+    Assert.deepEqual(
+      readTurn.request.tools.map(tool => tool.function.name),
+      [GET_PAGE_CONTENT],
+      "The first turn offers the page-read tool"
+    );
+    readTurn.respond({
+      text: "",
+      tokens: null,
+      isPrompt: false,
+      toolCalls: [
+        {
+          id: "call_read_three",
+          function: {
+            name: GET_PAGE_CONTENT,
+            arguments: JSON.stringify({
+              result_ids: ["result_1", "result_2", "result_3"],
+            }),
+          },
+        },
+      ],
+    });
+
+    // Turn 2 is the forced-schema turn, not another read round.
+    const answerTurn = await mockEngineManager.captureRequest({
+      purpose: PURPOSES.CHAT,
+    });
+    Assert.deepEqual(
+      answerTurn.request.tools,
+      [],
+      "The turn after the budget is spent offers no tools"
+    );
+    Assert.equal(
+      answerTurn.request.tool_choice,
+      "none",
+      "The turn after the budget is spent cannot call tools"
+    );
+    const answerArgs = JSON.stringify(answerTurn.request.args);
+    for (const index of [0, 1, 2]) {
+      Assert.ok(
+        answerArgs.includes(`Body of result page ${index}.`),
+        `The answer turn carries the extracted text of page ${index}`
+      );
+    }
+    Assert.ok(
+      !answerArgs.includes("Body of result page 3."),
+      "The unread fourth page contributes no content"
+    );
+    answerTurn.respond(
+      JSON.stringify({
+        answer: "Answer from three pages.",
+        could_answer: true,
+        confidence: 0.7,
+      })
+    );
+
+    const result = await runPromise;
+    Assert.equal(
+      result.answer,
+      "Answer from three pages.",
+      "The workflow answers in two model turns"
+    );
+    Assert.equal(
+      result.read_urls.length,
+      3,
+      "All three reads happened in the single read round"
+    );
+    mockEngineManager.assertAllRequestsHandled();
+    mockSearchManager.assertAllRequestsHandled();
+  } finally {
+    mockEngineManager.rejectAllRequests();
+    mockSearchManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
+    mockSearchManager.cleanupMocks();
+    await SpecialPowers.popPrefEnv();
+    await new Promise(resolve => pagesServer.stop(resolve));
+  }
+});
+
+add_task(async function test_search_the_web_json_round_skips_the_schema_turn() {
+  // A read round that asks for no page content is the final answer: the model
+  // is told to either call get_page_content or emit the JSON object, so a round
+  // whose body parses is returned as-is and the forced-schema turn — a whole
+  // round trip that only regenerates the same answer — never runs.
+  //
+  // This test answers exactly one model turn. A regression that always issues
+  // the schema turn fails here: the extra request either leaves the flow
+  // waiting for a response this test never gives (timeout), or shows up
+  // unhandled in assertAllRequestsHandled().
+  const results = [
+    { title: "Page", url: "https://example.com/page", snippet: "s" },
+  ];
+  await pushSearchPrefs();
+
+  const mockEngineManager = new MockEngineManager();
+  const mockSearchManager = new MockSearchManager();
+  const conversation = new ChatConversation({
+    pageUrl: new URL("https://example.com"),
+    pageMeta: {},
+  });
+
+  try {
+    const runPromise = runSearchTheWeb({ query: "widgets" }, conversation);
+    (await mockSearchManager.captureRequest()).respond({ results });
+
+    const readTurn = await mockEngineManager.captureRequest({
+      purpose: PURPOSES.CHAT,
+    });
+    Assert.equal(
+      readTurn.request.tool_choice,
+      "auto",
+      "The read round still lets the model call the page-read tool"
+    );
+    Assert.ok(
+      JSON.stringify(readTurn.request.args).includes(
+        "output only the final JSON object"
+      ),
+      "The read round tells the model it may answer with the final JSON object"
+    );
+
+    // Fenced, which is how models usually emit JSON in a prose turn.
+    const expectedAnswer = {
+      answer: "Widgets are nine dollars.",
+      could_answer: true,
+      confidence: 0.85,
+    };
+    readTurn.respond("```json\n" + JSON.stringify(expectedAnswer) + "\n```");
+
+    const result = await runPromise;
+    Assert.deepEqual(
+      result,
+      {
+        ...expectedAnswer,
+        searched_urls: ["https://example.com/page"],
+        read_urls: [],
+        requiresSearchHandoff: false,
+      },
+      "The answer emitted by the read round is returned without a schema turn"
+    );
+    mockEngineManager.assertAllRequestsHandled();
+    mockSearchManager.assertAllRequestsHandled();
+  } finally {
+    mockEngineManager.rejectAllRequests();
+    mockSearchManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
+    mockSearchManager.cleanupMocks();
+    await SpecialPowers.popPrefEnv();
+  }
+});
+
+add_task(async function test_search_the_web_prose_round_still_answers() {
+  // The "call the tool or emit JSON" contract is added client-side, so a
+  // Remote Settings prompt revision that contradicts it — or a model that
+  // simply ignores it — can still end a read round with prose. That must not
+  // lose the answer: the forced-schema turn is the fallback and still runs.
+  const results = [
+    { title: "Page", url: "https://example.com/page", snippet: "s" },
+  ];
+  await pushSearchPrefs();
+
+  const mockEngineManager = new MockEngineManager();
+  const mockSearchManager = new MockSearchManager();
+  const conversation = new ChatConversation({
+    pageUrl: new URL("https://example.com"),
+    pageMeta: {},
+  });
+
+  try {
+    const runPromise = runSearchTheWeb({ query: "widgets" }, conversation);
+    (await mockSearchManager.captureRequest()).respond({ results });
+
+    const prose = "From what I found, widgets are nine dollars right now.";
+    (
+      await mockEngineManager.captureRequest({ purpose: PURPOSES.CHAT })
+    ).respond(prose);
+
+    const answerTurn = await mockEngineManager.captureRequest({
+      purpose: PURPOSES.CHAT,
+    });
+    Assert.equal(
+      answerTurn.request.tool_choice,
+      "none",
+      "An unparseable read round falls back to the forced-schema turn"
+    );
+    Assert.deepEqual(
+      answerTurn.request.tools,
+      [],
+      "No tools are offered during the fallback schema turn"
+    );
+    Assert.ok(
+      JSON.stringify(answerTurn.request.args).includes(prose),
+      "The prose round stays in the transcript the schema turn answers from"
+    );
+    const expectedAnswer = {
+      answer: "Widgets are nine dollars.",
+      could_answer: true,
+      confidence: 0.6,
+    };
+    answerTurn.respond(JSON.stringify(expectedAnswer));
+
+    const result = await runPromise;
+    Assert.deepEqual(
+      result,
+      {
+        ...expectedAnswer,
+        searched_urls: ["https://example.com/page"],
+        read_urls: [],
+        requiresSearchHandoff: false,
+      },
+      "The schema turn recovers the answer from an unparseable read round"
+    );
+    mockEngineManager.assertAllRequestsHandled();
+    mockSearchManager.assertAllRequestsHandled();
+  } finally {
+    mockEngineManager.rejectAllRequests();
+    mockSearchManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
+    mockSearchManager.cleanupMocks();
+    await SpecialPowers.popPrefEnv();
+  }
+});
+
+add_task(async function test_search_the_web_reads_a_round_of_calls_at_once() {
+  // A round may emit several get_page_content calls. Every one of them is read,
+  // the reads overlap instead of queueing behind each other, the tool messages
+  // come back in tool-call order, and MAX_PAGES still bounds the total.
+  //
+  // The served pages hold their responses open, so the wait below can only be
+  // satisfied if the second tool call's read started while the first call's
+  // reads were still in flight. Serializing the calls again deadlocks here.
+  const bodies = [0, 1, 2, 3].map(
+    index =>
+      `<!DOCTYPE html><html><head><meta charset="utf-8" /><title>Page ${index}</title></head>` +
+      `<body><article><p>Gated body of result page ${index}.</p></article></body></html>`
+  );
+  const {
+    urls,
+    requestCounts,
+    pendingCount,
+    releaseAll,
+    server: pagesServer,
+  } = serveGatedResultPages(bodies);
+  const results = urls.map((url, index) => ({
+    title: `Page ${index}`,
+    url,
+    snippet: `snippet ${index}`,
+  }));
+  await pushSearchPrefs();
+
+  const mockEngineManager = new MockEngineManager();
+  const mockSearchManager = new MockSearchManager();
+  const conversation = new ChatConversation({
+    pageUrl: new URL("https://example.com"),
+    pageMeta: {},
+  });
+
+  try {
+    const runPromise = runSearchTheWeb({ query: "pages" }, conversation);
+    (await mockSearchManager.captureRequest()).respond({ results });
+
+    const readTurn = await mockEngineManager.captureRequest({
+      purpose: PURPOSES.CHAT,
+    });
+    readTurn.respond({
+      text: "",
+      tokens: null,
+      isPrompt: false,
+      toolCalls: [
+        {
+          id: "call_first_pair",
+          function: {
+            name: GET_PAGE_CONTENT,
+            arguments: JSON.stringify({
+              result_ids: ["result_1", "result_2"],
+            }),
+          },
+        },
+        {
+          id: "call_second_pair",
+          function: {
+            name: GET_PAGE_CONTENT,
+            arguments: JSON.stringify({
+              result_ids: ["result_3", "result_4"],
+            }),
+          },
+        },
+      ],
+    });
+
+    // MAX_PAGES (3) is claimed in tool-call order: the first call takes two
+    // pages and leaves one for the second, so three reads are in flight at
+    // once and the fourth page is never requested.
+    await TestUtils.waitForCondition(
+      () => pendingCount() === 3,
+      "Both tool calls' reads are in flight at the same time"
+    );
+    releaseAll();
+
+    const answerTurn = await mockEngineManager.captureRequest({
+      purpose: PURPOSES.CHAT,
+    });
+    const toolMessages = answerTurn.request.args.filter(
+      message => message.role === "tool"
+    );
+    Assert.deepEqual(
+      toolMessages.map(message => message.tool_call_id),
+      ["call_first_pair", "call_second_pair"],
+      "The tool messages are appended in tool-call order"
+    );
+    Assert.ok(
+      toolMessages[0].content.includes("Gated body of result page 0.") &&
+        toolMessages[0].content.includes("Gated body of result page 1."),
+      "The first tool call's message carries both of the pages it read"
+    );
+    Assert.ok(
+      toolMessages[1].content.includes("Gated body of result page 2."),
+      "The second tool call's message carries the page left in the budget"
+    );
+    Assert.ok(
+      !JSON.stringify(answerTurn.request.args).includes(
+        "Gated body of result page 3."
+      ),
+      "The fourth page is beyond MAX_PAGES and contributes no content"
+    );
+    answerTurn.respond(
+      JSON.stringify({
+        answer: "Answer from the batched pages.",
+        could_answer: true,
+        confidence: 0.7,
+      })
+    );
+
+    const result = await runPromise;
+    Assert.deepEqual(
+      result.read_urls,
+      [urls[0], urls[1], urls[2]],
+      "MAX_PAGES bounds the round's reads and is claimed in tool-call order"
+    );
+    Assert.deepEqual(
+      requestCounts,
+      [1, 1, 1, 0],
+      "Only the three pages within the page budget are fetched"
+    );
+    mockEngineManager.assertAllRequestsHandled();
+    mockSearchManager.assertAllRequestsHandled();
+  } finally {
+    releaseAll();
     mockEngineManager.rejectAllRequests();
     mockSearchManager.rejectAllRequests();
     mockEngineManager.cleanupMocks();
@@ -619,21 +1053,18 @@ add_task(async function test_search_the_web_page_read_timeout_does_not_hang() {
     });
 
     // The read hangs and times out (~50ms). The fallback text is fed back as
-    // the tool result, so the next request's args must contain it — proof the
-    // stuck read resolved instead of hanging the flow.
-    const afterReadTurn = await mockEngineManager.captureRequest({
+    // the tool result, so the final request's args must contain it — proof the
+    // stuck read resolved instead of hanging the flow. A timed-out read still
+    // counts as read, so no further read is possible and this is the
+    // forced-schema turn.
+    const answerTurn = await mockEngineManager.captureRequest({
       purpose: PURPOSES.CHAT,
     });
     Assert.ok(
-      JSON.stringify(afterReadTurn.request.args).includes("Timed out reading"),
+      JSON.stringify(answerTurn.request.args).includes("Timed out reading"),
       "A stuck page read resolves to the timeout fallback"
     );
-    afterReadTurn.respond("The results are enough to answer.");
-
-    // Final structured-answer turn.
-    (
-      await mockEngineManager.captureRequest({ purpose: PURPOSES.CHAT })
-    ).respond(
+    answerTurn.respond(
       JSON.stringify({
         answer: "Widgets vary in price.",
         could_answer: true,
