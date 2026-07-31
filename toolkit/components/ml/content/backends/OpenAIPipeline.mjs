@@ -42,6 +42,18 @@ ChromeUtils.defineESModuleGetters(
   { global: "current" }
 );
 
+/**
+ * How long to keep reading after the model signals it wants tools. All the
+ * server still owes at that point is the usage chunk and the end of the
+ * stream, so this only has to cover a round trip; stalling the turn would be
+ * worse than losing the usage.
+ *
+ * @type {number}
+ */
+const TOOL_CALL_DRAIN_TIMEOUT_MS = 2000;
+
+const DRAIN_TIMED_OUT = Symbol("drain-timed-out");
+
 export class OpenAIPipeline {
   #errorFactory = null;
   #options = null;
@@ -230,7 +242,46 @@ export class OpenAIPipeline {
     let usage = null;
     let chunkIndex = 0;
 
-    for await (const chunk of stream) {
+    // Iterated by hand rather than with `for await` so the wait after
+    // finish_reason can be bounded. Leaving the iterator before it completes
+    // makes the SDK abort the request, which on http/1.1 costs the pooled
+    // connection and either way discards the usage chunk the server sends
+    // after finish_reason, so the normal path now reads to the end.
+    const iterator = stream[Symbol.asyncIterator]();
+
+    while (true) {
+      let result;
+      if (sawToolCallsFinish) {
+        let timer;
+        result = await Promise.race([
+          iterator.next(),
+          new Promise(resolve => {
+            timer = setTimeout(
+              () => resolve(DRAIN_TIMED_OUT),
+              TOOL_CALL_DRAIN_TIMEOUT_MS
+            );
+          }),
+        ]);
+        clearTimeout(timer);
+        if (result === DRAIN_TIMED_OUT) {
+          ChromeUtils.addProfilerMarker(
+            "MLEngine:OpenAI",
+            {},
+            "Tool-call drain timed out; cancelling"
+          );
+          // Cancels the request, which is what breaking used to do here.
+          await iterator.return?.();
+          break;
+        }
+      } else {
+        result = await iterator.next();
+      }
+
+      if (result.done) {
+        break;
+      }
+
+      const chunk = result.value;
       const chunkTime = ChromeUtils.now();
       const choice = chunk?.choices?.[0];
       const delta = choice?.delta ?? {};
@@ -289,8 +340,8 @@ export class OpenAIPipeline {
           toolCalls,
         });
 
-        // Typically end this assistant turn here.
-        break;
+        // This ends the assistant turn, but keep reading: the usage chunk comes
+        // after finish_reason, and leaving now would cancel the request.
       }
     }
 

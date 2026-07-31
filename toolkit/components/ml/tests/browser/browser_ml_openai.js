@@ -253,6 +253,77 @@ add_task(async function test_openai_client_tools_streaming() {
 });
 
 /**
+ * A turn that ends in tool_calls must keep reading to the end of the stream.
+ * The usage chunk arrives after finish_reason, so stopping there loses it — and
+ * leaving the SDK's iterator early cancels the request, which on http/1.1 also
+ * costs the pooled connection.
+ */
+add_task(async function test_openai_tool_call_turn_reports_usage() {
+  const records = [
+    {
+      ...BASE_ENGINE_OPTIONS,
+      id: "5c1f0e64-3a7d-4b28-9f51-2ad0c6e4b7aa",
+    },
+  ];
+  const { cleanup } = await setup({ records });
+  const { server: mockServer, port } = startMockOpenAI();
+
+  const engineInstance = await createEngine({
+    ...BASE_ENGINE_OPTIONS,
+    apiKey: "ollama",
+    baseURL: `http://localhost:${port}/v1`,
+    backend: "openai",
+  });
+
+  try {
+    const gen = engineInstance.runWithGenerator({
+      args: [
+        { role: "system", content: "You are a helpful assistant." },
+        { role: "user", content: "Find my open news tabs." },
+      ],
+      tools: SHARED_TOOLS,
+      streamOptions: { enabled: true },
+    });
+
+    // Deliberately consume every chunk instead of stopping at toolCalls: what
+    // is under test is that the turn keeps reading past finish_reason.
+    let toolCalls = null;
+    let usage = null;
+    for await (const chunk of gen) {
+      if (chunk.toolCalls?.length) {
+        toolCalls = chunk.toolCalls;
+      }
+      if (chunk.usage) {
+        usage = chunk.usage;
+      }
+    }
+
+    Assert.ok(toolCalls, "The tool calls still reach the caller");
+    Assert.equal(
+      toolCalls[0].function.name,
+      "search_open_tabs",
+      "Tool name should match"
+    );
+
+    Assert.ok(
+      usage,
+      "Usage from after finish_reason reaches the caller, so a tool round is " +
+        "measurable rather than invisible"
+    );
+    Assert.equal(usage.prompt_tokens, 9839, "Prompt token count survives");
+    Assert.equal(
+      usage.prompt_tokens_details.cached_tokens,
+      9800,
+      "Cached token count survives, which is what the prompt cache is judged on"
+    );
+  } finally {
+    await EngineProcess.destroyMLEngine();
+    await cleanup();
+    await stopMockOpenAI(mockServer);
+  }
+});
+
+/**
  * Test that fxAccountToken is properly passed to the OpenAI client
  */
 add_task(async function test_openai_fxaccount_token() {

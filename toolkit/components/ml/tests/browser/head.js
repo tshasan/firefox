@@ -916,6 +916,23 @@ function startMockOpenAI({
         choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
       });
 
+      // stream_options.include_usage puts usage in a final chunk that arrives
+      // after finish_reason, so a client that stops reading at finish_reason
+      // never sees it. Mirrors the real endpoint.
+      sendSSE({
+        id: "chatcmpl-mock-tools-stream-usage",
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: "qwen3:0.6b",
+        choices: [],
+        usage: {
+          prompt_tokens: 9839,
+          completion_tokens: 12,
+          total_tokens: 9851,
+          prompt_tokens_details: { cached_tokens: 9800 },
+        },
+      });
+
       endSSE();
       return;
     }
