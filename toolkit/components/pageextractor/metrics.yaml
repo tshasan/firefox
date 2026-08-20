@@ -1,0 +1,202 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+# Adding a new metric? We have docs for that!
+# https://firefox-source-docs.mozilla.org/toolkit/components/glean/user/new_definitions_file.html
+
+---
+$schema: moz://mozilla.org/schemas/glean/metrics/2-0-0
+$tags:
+  - "Core :: Machine Learning"
+
+pageextractor.extraction:
+  wait_for_ready:
+    type: event
+    description: >
+      Recorded when PageExtractor finishes waiting for a page to become
+      ready for extraction (DOMContentLoaded, an idle callback, and paint),
+      or fails/times out doing so. Correlates with a "PageExtractor"
+      profiler marker sharing the same flow_id.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=2058247
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=2058247
+      # TODO: data review
+    data_sensitivity:
+      - interaction
+    notification_emails: &emails
+      - firefox-ai-and-ml@mozilla.com
+    expires: never
+    extra_keys:
+      flow_id: &flow_id
+        type: string
+        description: >
+          Unique identifier correlating this event with other PageExtractor
+          telemetry events and profiler markers for the same extraction
+          request.
+      status: &status
+        type: string
+        description: >
+          Outcome of the phase: success, error, unavailable, or
+          document-hidden.
+      error_type: &error_type
+        type: string
+        description: >
+          Why the phase failed, empty when status is not "error": the
+          error's name, such as "TypeError" or "TimeoutError". Error
+          messages are never recorded, only the name, so no path, URL, or
+          page content can appear here.
+      duration_ms: &duration_ms
+        type: quantity
+        description: >
+          Wall-clock time spent in this phase, in milliseconds.
+
+  get_page_metadata:
+    type: event
+    description: >
+      Recorded when PageExtractor finishes computing page metadata (word
+      count, language, structured-data types, readerability), or fails.
+      Correlates with a "PageExtractor" profiler marker sharing the same
+      flow_id.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=2058247
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=2058247
+      # TODO: data review
+    data_sensitivity:
+      - interaction
+    notification_emails: *emails
+    expires: never
+    extra_keys:
+      flow_id: *flow_id
+      strategy:
+        type: string
+        description: >
+          Which strategy produced the result: about-reader or dom.
+      status: *status
+      error_type: *error_type
+      duration_ms: *duration_ms
+
+  get_text:
+    type: event
+    description: >
+      Recorded when PageExtractor finishes a getText() extraction request,
+      whether it succeeded, found nothing extractable, or failed.
+      Correlates with a "PageExtractor" profiler marker sharing the same
+      flow_id. The extra keys mirror the effective GetTextOptions the
+      profiler marker's "options" field shows, so a profile and this event
+      describe the same request in the same terms.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=2058247
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=2058247
+      # TODO: data review
+    data_sensitivity:
+      - interaction
+    notification_emails: *emails
+    expires: never
+    extra_keys:
+      flow_id: *flow_id
+      strategy:
+        type: string
+        description: >
+          Which extraction path produced the result: dom, about-reader,
+          reader, pdf, youtube-transcript, or youtube-dom.
+      site_strategy:
+        type: string
+        description: >
+          The site-specific DOMExtractor strategy applied within the dom
+          extraction path, when one matched the sourceUrl: google-search or
+          youtube. Empty when no site-specific strategy applied (the default
+          extraction rules were used, or the strategy field above is not
+          dom/youtube-dom).
+      status:
+        type: string
+        description: >
+          Outcome of the extraction: success, unavailable, or error.
+      error_type: *error_type
+      duration_ms: *duration_ms
+      text_length:
+        type: quantity
+        description: >
+          Length, in UTF-16 code units (JS string .length), of the extracted
+          text. Never the text itself.
+      link_count:
+        type: quantity
+        description: >
+          Number of links extracted.
+      canvas_count:
+        type: quantity
+        description: >
+          Number of canvas snapshots captured.
+      sufficient_length:
+        type: quantity
+        description: >
+          The effective sufficientLength GetTextOptions value requested by
+          the caller, in UTF-16 code units, or 0 for unbounded.
+      just_viewport:
+        type: boolean
+        description: >
+          The effective justViewport GetTextOptions value requested by the
+          caller.
+      remove_boilerplate:
+        type: boolean
+        description: >
+          The effective removeBoilerplate GetTextOptions value requested by
+          the caller.
+      force_remove_boilerplate:
+        type: boolean
+        description: >
+          The effective _forceRemoveBoilerplate GetTextOptions value; only
+          ever true in automated tests.
+      include_canvas_snapshots:
+        type: boolean
+        description: >
+          The effective includeCanvasSnapshots GetTextOptions value
+          requested by the caller.
+      min_canvas_size:
+        type: quantity
+        description: >
+          The effective minCanvasSize GetTextOptions value, in pixels.
+      max_canvas_count:
+        type: quantity
+        description: >
+          The effective maxCanvasCount GetTextOptions value.
+      max_canvas_dimension:
+        type: quantity
+        description: >
+          The effective maxCanvasDimension GetTextOptions value, in pixels.
+      canvas_quality_percent:
+        type: quantity
+        description: >
+          The effective canvasQuality GetTextOptions value, as a 0-100
+          percentage (GetTextOptions stores it as a 0-1 fraction; Glean
+          quantities must be integers).
+
+  headless_extractor:
+    type: event
+    description: >
+      Recorded when a headless (hidden-browser) PageExtractor finishes
+      loading and extracting a page, or fails to. Correlates with a
+      "PageExtractor" profiler marker, and with the get_text event for the
+      extraction performed inside it, sharing the same flow_id.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=2058247
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=2058247
+      # TODO: data review
+    data_sensitivity:
+      - interaction
+    notification_emails: *emails
+    expires: never
+    extra_keys:
+      flow_id: *flow_id
+      strategy:
+        type: string
+        description: >
+          headless or headless-anonymous, depending on whether the fetch
+          was performed anonymously.
+      status: *status
+      error_type: *error_type
+      duration_ms: *duration_ms

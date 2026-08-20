@@ -5,7 +5,7 @@
 // @ts-check
 
 /**
- * @import { GetTextOptions, CanvasSnapshot, ExtractionResult, PageMetadata, ReaderModeDocument } from './PageExtractor.d.ts'
+ * @import { GetTextOptions, CanvasSnapshot, DOMExtractionResult, ExtractionResult, PageMetadata, ReaderModeDocument } from './PageExtractor.d.ts'
  * @import { PageExtractorParent } from './PageExtractorParent.sys.mjs'
  */
 
@@ -19,6 +19,10 @@
 const MAX_REQUEST_IDLE_CALLBACK_DELAY_MS = 2000;
 
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
+import {
+  resolveMaxCanvasDimension,
+  resolveCanvasQuality,
+} from "moz-src:///toolkit/components/pageextractor/DOMExtractor.sys.mjs";
 
 const lazy = XPCOMUtils.declareLazy({
   console: () =>
@@ -33,6 +37,8 @@ const lazy = XPCOMUtils.declareLazy({
     "moz-src:///toolkit/components/pageextractor/YouTubeExtraction.sys.mjs",
   getYouTubeContent:
     "moz-src:///toolkit/components/pageextractor/YouTubeExtraction.sys.mjs",
+  PageExtractorEvent:
+    "moz-src:///toolkit/components/pageextractor/PageExtractorEvents.sys.mjs",
   isProbablyReaderable: "resource://gre/modules/Readerable.sys.mjs",
   youtubeTimeoutMs: {
     pref: "browser.pageextractor.youtube.timeoutMs",
@@ -55,27 +61,15 @@ export class PageExtractorChild extends JSWindowActorChild {
    */
   async receiveMessage({ name, data }) {
     switch (name) {
-      case "PageExtractorParent:GetText":
-        await this.waitForPageReady();
-        return this.getText(data);
+      case "PageExtractorParent:GetText": {
+        const { options, flowId } = data;
+        await this.waitForPageReady(flowId);
+        return this.getText(options, flowId);
+      }
       case "PageExtractorParent:WaitForPageReady":
-        return this.waitForPageReady();
+        return this.waitForPageReady(data?.flowId);
       case "PageExtractorParent:GetPageMetadata":
-        if (this.isAboutReader()) {
-          const document = this.browsingContext?.window?.document;
-          const result = await this.getText({ removeBoilerplate: true });
-          const text = result?.text ?? "";
-          const language = document?.querySelector(".container")?.lang ?? "";
-          const wordCount = this.#getWordCount(language, text);
-
-          return {
-            structuredDataTypes: [],
-            wordCount,
-            language,
-            isReaderable: true,
-          };
-        }
-        return this.getPageMetadata();
+        return this.#getPageMetadata(data?.flowId);
     }
     return Promise.reject(new Error("Unknown message: " + name));
   }
@@ -85,33 +79,79 @@ export class PageExtractorChild extends JSWindowActorChild {
    * requestAnimationFrame so layout and paint are committed before
    * extraction reads page geometry.
    *
-   * @returns {Promise<void>}
+   * @param {string | undefined} flowId
+   * @returns {Promise<{ status: string }>}
    */
-  async waitForPageReady() {
+  async waitForPageReady(flowId) {
+    const event = this.#startEvent("wait-for-ready", { flowId });
     const doc = this.document;
     const win = doc.documentGlobal;
+    try {
+      if (doc.readyState == "loading") {
+        await new Promise(resolve => {
+          doc.addEventListener("DOMContentLoaded", resolve, { once: true });
+        });
+      } else {
+        lazy.console.log("The page is already interactive");
+      }
 
-    if (doc.readyState == "loading") {
       await new Promise(resolve => {
-        doc.addEventListener("DOMContentLoaded", resolve, { once: true });
+        win.requestIdleCallback(resolve, {
+          timeout: MAX_REQUEST_IDLE_CALLBACK_DELAY_MS,
+        });
       });
-    } else {
-      lazy.console.log("The page is already interactive");
+
+      const wasHidden = doc.hidden;
+      if (!wasHidden) {
+        await new Promise(resolve => {
+          win.requestAnimationFrame(() => win.requestAnimationFrame(resolve));
+        });
+      }
+
+      const status = wasHidden ? "document-hidden" : "success";
+      event.finish({ status });
+      return { status };
+    } catch (error) {
+      event.finish({ status: "error", errorName: error.name });
+      throw error;
     }
+  }
 
-    await new Promise(resolve => {
-      win.requestIdleCallback(resolve, {
-        timeout: MAX_REQUEST_IDLE_CALLBACK_DELAY_MS,
-      });
-    });
-
-    if (doc.hidden) {
-      return;
+  /**
+   * @param {string | undefined} flowId
+   * @returns {Promise<{ result: PageMetadata, eventData: { strategy: string } }>}
+   */
+  async #getPageMetadata(flowId) {
+    const event = this.#startEvent("get-page-metadata", { flowId });
+    try {
+      let result;
+      let strategy;
+      if (this.isAboutReader()) {
+        const document = this.browsingContext?.window?.document;
+        const extraction = await this.getText(
+          { removeBoilerplate: true },
+          flowId
+        );
+        const text = extraction?.result?.text ?? "";
+        const language = document?.querySelector(".container")?.lang ?? "";
+        result = {
+          structuredDataTypes: [],
+          wordCount: this.#getWordCount(language, text),
+          language,
+          isReaderable: true,
+        };
+        strategy = "about-reader";
+      } else {
+        result = await this.getPageMetadata();
+        strategy = "dom";
+      }
+      event.addData({ strategy });
+      event.finish({ status: "success" });
+      return { result, eventData: { strategy } };
+    } catch (error) {
+      event.finish({ status: "error", errorName: error.name });
+      throw error;
     }
-
-    await new Promise(resolve => {
-      win.requestAnimationFrame(() => win.requestAnimationFrame(resolve));
-    });
   }
 
   /**
@@ -230,9 +270,17 @@ export class PageExtractorChild extends JSWindowActorChild {
    * @see PageExtractorParent#getText for docs
    *
    * @param {GetTextOptions} options
-   * @returns {Promise<ExtractionResult | null>}
+   * @param {string | undefined} flowId
+   * @returns {Promise<{ result: ExtractionResult, eventData: { strategy: string, siteStrategy: string | undefined } } | null>}
    */
-  async getText(options = {}) {
+  async getText(options = {}, flowId) {
+    const event = this.#startEvent("get-text", {
+      flowId,
+      options,
+      strategy: "dom",
+    });
+    let strategy = "dom";
+    let siteStrategy;
     const window = this.browsingContext?.window;
     /** @type {Document} */
     let document = window?.document;
@@ -244,19 +292,17 @@ export class PageExtractorChild extends JSWindowActorChild {
     let youtubeContentPromise = null;
     const sourceUrl = URL.parse(options.sourceUrl);
     if (lazy.shouldExtractYouTube(sourceUrl)) {
-      youtubeContentPromise = lazy
-        .getYouTubeContent(document, {
-          timeoutMs: lazy.youtubeTimeoutMs,
-          sufficientLength: options.sufficientLength,
-          currentVideoId: sourceUrl.searchParams.get("v"),
-        })
-        .catch(error => {
-          lazy.console.warn?.("Failed to extract YouTube content", error);
-          return { text: "", replacesContent: false };
-        });
+      youtubeContentPromise = this.#getYouTubeContentWithEvents(
+        document,
+        sourceUrl,
+        options,
+        event.flowId
+      );
     }
 
     if (this.isAboutReader()) {
+      strategy = "about-reader";
+      event.addData({ strategy });
       // If about:reader is loaded, find the proper rootNode so that we just get the
       // content and not any of the UI. This will get passed to DOMExtractor so that
       // the rest of the GetTextOptions can be applied.
@@ -267,6 +313,7 @@ export class PageExtractorChild extends JSWindowActorChild {
 
       if (!document) {
         lazy.console.log("No content document was available");
+        event.finish({ status: "unavailable" });
         return null;
       }
 
@@ -274,6 +321,7 @@ export class PageExtractorChild extends JSWindowActorChild {
       rootNode = document.querySelector(".container");
       if (!rootNode) {
         lazy.console.log("No container was found in reader mode.");
+        event.finish({ status: "unavailable" });
         return null;
       }
     } else if (options.removeBoilerplate) {
@@ -286,14 +334,23 @@ export class PageExtractorChild extends JSWindowActorChild {
       ) {
         // Run the document through reader mode, and use the DOMParser version of the
         // content.
-        /** @type {ReaderModeDocument | null} */
-        const readerModeDocument =
-          await lazy.ReaderMode.parseDocument(document);
+        const readerModeDocument = await this.#parseReaderDocument(
+          document,
+          event.flowId
+        );
         if (readerModeDocument) {
+          strategy = "reader";
+          event.addData({ strategy });
           lazy.console.log("Document is readerable");
-          const { content } = readerModeDocument;
-          const parser = new DOMParser();
-          document = parser.parseFromString(content, "text/html");
+          const outputEvent = this.#startEvent("reader-output-parse", {
+            flowId: event.flowId,
+            strategy,
+          });
+          document = new DOMParser().parseFromString(
+            readerModeDocument.content,
+            "text/html"
+          );
+          outputEvent.finish({ status: "success" });
           rootNode = document.body;
         } else {
           lazy.console.log(
@@ -317,20 +374,34 @@ export class PageExtractorChild extends JSWindowActorChild {
 
     if (!document) {
       lazy.console.log("No document was found.");
+      event.finish({ status: "unavailable" });
       return null;
     }
 
     // All of the content gets extracted using the DOMExtractor, which knows how
     // to apply certain settings in GetTextOptions.
-    const { text, links, canvases } = lazy.extractTextFromDOM(
+    const extraction = this.#extractFromDOM(
       document,
       rootNode,
-      options
+      options,
+      event.flowId,
+      strategy
     );
+    const { text, links, canvases } = extraction;
+    // "default" means no site-specific strategy applied; only surface the
+    // named ones (e.g. "google-search", "youtube") on the top-level event.
+    if (extraction.siteStrategy && extraction.siteStrategy !== "default") {
+      siteStrategy = extraction.siteStrategy;
+      event.addData({ siteStrategy });
+    }
 
     let canvasSnapshots = [];
     if (options.includeCanvasSnapshots && canvases.length) {
-      canvasSnapshots = await this.#captureCanvases(canvases, options);
+      canvasSnapshots = await this.#captureCanvases(
+        canvases,
+        options,
+        event.flowId
+      );
     }
 
     // On YouTube a transcript block replaces the generic walk. Without
@@ -343,12 +414,114 @@ export class PageExtractorChild extends JSWindowActorChild {
       finalText = youtube.replacesContent
         ? youtube.text
         : [youtube.text, text].filter(Boolean).join("\n\n");
+      strategy = youtube.replacesContent ? "youtube-transcript" : "youtube-dom";
+      event.addData({ strategy });
     }
 
     lazy.console.log("GetText", options);
     lazy.console.debug({ text: finalText, links, canvasSnapshots });
 
-    return { text: finalText, links, canvasSnapshots };
+    event.finish({
+      status: "success",
+      textLength: finalText.length,
+      linkCount: links.length,
+      canvasCount: canvasSnapshots.length,
+    });
+    return {
+      result: { text: finalText, links, canvasSnapshots },
+      eventData: { strategy, siteStrategy },
+    };
+  }
+
+  /**
+   * @param {Document} document
+   * @param {URL} sourceUrl
+   * @param {GetTextOptions} options
+   * @param {string | undefined} flowId
+   * @returns {Promise<{ text: string, replacesContent: boolean }>}
+   */
+  async #getYouTubeContentWithEvents(document, sourceUrl, options, flowId) {
+    const event = this.#startEvent("youtube-extract", {
+      flowId,
+      strategy: "youtube",
+    });
+    try {
+      const result = await lazy.getYouTubeContent(document, {
+        timeoutMs: lazy.youtubeTimeoutMs,
+        sufficientLength: options.sufficientLength,
+        currentVideoId: sourceUrl.searchParams.get("v"),
+      });
+      event.finish({
+        status: result.text ? "success" : "empty",
+        textLength: result.text.length,
+      });
+      return result;
+    } catch (error) {
+      event.finish({ status: "error", errorName: error.name });
+      lazy.console.warn?.("Failed to extract YouTube content", error);
+      return { text: "", replacesContent: false };
+    }
+  }
+
+  /**
+   * @param {Document} document
+   * @param {string | undefined} flowId
+   * @returns {Promise<ReaderModeDocument | null>}
+   */
+  async #parseReaderDocument(document, flowId) {
+    const event = this.#startEvent("reader-parse", {
+      flowId,
+      strategy: "reader",
+    });
+    try {
+      const result = await lazy.ReaderMode.parseDocument(document);
+      event.finish({ status: result ? "success" : "unavailable" });
+      return result;
+    } catch (error) {
+      event.finish({ status: "error", errorName: error.name });
+      throw error;
+    }
+  }
+
+  /**
+   * @param {Document} document
+   * @param {HTMLElement} rootNode
+   * @param {GetTextOptions} options
+   * @param {string | undefined} flowId
+   * @param {string | undefined} strategy
+   * @returns {DOMExtractionResult}
+   */
+  #extractFromDOM(document, rootNode, options, flowId, strategy) {
+    const event = this.#startEvent("dom-extract", {
+      flowId,
+      strategy,
+    });
+    try {
+      const result = lazy.extractTextFromDOM(document, rootNode, options);
+      event.finish({
+        status: "success",
+        textLength: result.text.length,
+        linkCount: result.links.length,
+        canvasCount: result.canvases.length,
+        siteStrategy: result.siteStrategy,
+      });
+      return result;
+    } catch (error) {
+      event.finish({ status: "error", errorName: error.name });
+      throw error;
+    }
+  }
+
+  /**
+   * @param {string} phase
+   * @param {Record<string, any>} [data]
+   */
+  #startEvent(phase, data = {}) {
+    return new lazy.PageExtractorEvent(phase, {
+      process: "content",
+      innerWindowId: this.contentWindow?.windowGlobalChild?.innerWindowId ?? 0,
+      ...data,
+    });
   }
 
   /**
@@ -370,16 +543,25 @@ export class PageExtractorChild extends JSWindowActorChild {
    *
    * @param {HTMLCanvasElement[]} canvases
    * @param {GetTextOptions} options
+   * @param {string | undefined} flowId
    * @returns {Promise<CanvasSnapshot[]>}
    */
-  async #captureCanvases(canvases, options) {
-    const maxDimension = options.maxCanvasDimension ?? 1024;
-    const quality = options.canvasQuality ?? 0.8;
+  async #captureCanvases(canvases, options, flowId) {
+    const event = this.#startEvent("canvas-capture", { flowId });
+    const maxDimension = resolveMaxCanvasDimension(options);
+    const quality = resolveCanvasQuality(options);
 
-    const results = await Promise.all(
-      canvases.map(c => this.#captureCanvas(c, maxDimension, quality))
-    );
-    return results.filter(Boolean);
+    try {
+      const results = await Promise.all(
+        canvases.map(c => this.#captureCanvas(c, maxDimension, quality))
+      );
+      const snapshots = results.filter(Boolean);
+      event.finish({ status: "success", canvasCount: snapshots.length });
+      return snapshots;
+    } catch (error) {
+      event.finish({ status: "error", errorName: error.name });
+      throw error;
+    }
   }
 
   /**

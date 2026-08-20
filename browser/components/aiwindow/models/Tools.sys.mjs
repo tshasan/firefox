@@ -1099,13 +1099,14 @@ export class GetPageContent {
       if (conversation.serpUrlsForAnonymousFetch.has(url)) {
         return PageExtractorParent.getHeadlessExtractor({
           urlString: url,
-          callback: pageExtractor =>
+          callback: (pageExtractor, flowId) =>
             GetPageContent.#runExtraction(
               pageExtractor,
               conversation,
               label,
               url,
-              signal
+              signal,
+              flowId
             ),
           anonymousFetch: true,
         });
@@ -1118,13 +1119,14 @@ export class GetPageContent {
 
     return PageExtractorParent.getHeadlessExtractor({
       urlString: url,
-      callback: pageExtractor =>
+      callback: (pageExtractor, flowId) =>
         GetPageContent.#runExtraction(
           pageExtractor,
           conversation,
           label,
           url,
-          signal
+          signal,
+          flowId
         ),
     });
   }
@@ -1139,6 +1141,8 @@ export class GetPageContent {
    * @param {string} sourceUrl
    * @param {AbortSignal} [signal] - Rejects the extraction early if it aborts,
    *   which lets the headless browser hosting the read be torn down promptly.
+   * @param {string} [flowId] - Correlates this extraction with the enclosing
+   *   headless-extractor profiler marker/telemetry event.
    * @returns {Promise<string>}
    *  A promise resolving to a formatted string containing the page content
    *  with mode and label information, or an error message if no content is available.
@@ -1148,15 +1152,19 @@ export class GetPageContent {
     conversation,
     label,
     sourceUrl,
-    signal
+    signal,
+    flowId
   ) {
     const extraction = await raceAbort(
-      pageExtractor.getText({
-        sufficientLength: GetPageContent.MAX_CHARACTERS,
-        cleanWhitespace: true,
-        removeBoilerplate: true,
-        sourceUrl,
-      }),
+      pageExtractor.getText(
+        {
+          sufficientLength: GetPageContent.MAX_CHARACTERS,
+          cleanWhitespace: true,
+          removeBoilerplate: true,
+          sourceUrl,
+        },
+        flowId
+      ),
       signal
     );
 

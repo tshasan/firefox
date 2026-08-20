@@ -26,19 +26,69 @@ const MARKDOWN_TEXT_ESCAPE_REGEX = /[\[\]()]/g;
 const OPEN_PAREN_REGEX = /\(/g;
 const CLOSE_PAREN_REGEX = /\)/g;
 
+export const DEFAULT_MIN_CANVAS_SIZE = 50;
+export const DEFAULT_MAX_CANVAS_COUNT = 10;
+export const DEFAULT_MAX_CANVAS_DIMENSION = 1024;
+export const DEFAULT_CANVAS_QUALITY = 0.8;
+
+/**
+ * These resolve*() helpers are the single place the effective value of a
+ * canvas-related GetTextOptions field is computed. ExtractionContext,
+ * PageExtractorChild's canvas capture, and PageExtractorEvents' telemetry
+ * extras all call them instead of each re-deriving the same default, so the
+ * three can't drift out of sync.
+ *
+ * @param {GetTextOptions} options
+ * @returns {number}
+ */
+export function resolveMinCanvasSize(options) {
+  return options.minCanvasSize ?? DEFAULT_MIN_CANVAS_SIZE;
+}
+
+/**
+ * @param {GetTextOptions} options
+ * @returns {number}
+ */
+export function resolveMaxCanvasCount(options) {
+  // Only meaningful when canvas snapshots are enabled; forced to 0
+  // otherwise, even if the caller passed an explicit value.
+  return options.includeCanvasSnapshots
+    ? (options.maxCanvasCount ?? DEFAULT_MAX_CANVAS_COUNT)
+    : 0;
+}
+
+/**
+ * @param {GetTextOptions} options
+ * @returns {number}
+ */
+export function resolveMaxCanvasDimension(options) {
+  return options.maxCanvasDimension ?? DEFAULT_MAX_CANVAS_DIMENSION;
+}
+
+/**
+ * @param {GetTextOptions} options
+ * @returns {number}
+ */
+export function resolveCanvasQuality(options) {
+  return options.canvasQuality ?? DEFAULT_CANVAS_QUALITY;
+}
+
 const DEFAULT_STRATEGY = {
+  name: "default",
   filterSelector: null,
   formatBlockAnchorsAsMarkdown: false,
   formatBlockAnchorSelector: null,
 };
 
 const GOOGLE_SEARCH_STRATEGY = {
+  name: "google-search",
   filterSelector: "cite",
   formatBlockAnchorsAsMarkdown: true,
   formatBlockAnchorSelector: "cite",
 };
 
 const YOUTUBE_STRATEGY = {
+  name: "youtube",
   filterSelector: [
     "transcript-segment-view-model",
     "ytd-transcript-segment-renderer",
@@ -127,10 +177,8 @@ class ExtractionContext {
    */
   constructor(document, options) {
     this.#options = options;
-    this.#minCanvasSize = options.minCanvasSize ?? 50;
-    this.#maxCanvasCount = options.includeCanvasSnapshots
-      ? (options.maxCanvasCount ?? 10)
-      : 0;
+    this.#minCanvasSize = resolveMinCanvasSize(options);
+    this.#maxCanvasCount = resolveMaxCanvasCount(options);
 
     if (options.justViewport) {
       const { visualViewport } = document.defaultView;
@@ -146,6 +194,16 @@ class ExtractionContext {
     if (options.sourceUrl) {
       this.#strategy = getStrategyForUrl(URL.parse(options.sourceUrl));
     }
+  }
+
+  /**
+   * The name of the site-specific strategy applied to this extraction (e.g.
+   * "google-search", "youtube", or "default"), for telemetry/marker use.
+   *
+   * @returns {string}
+   */
+  get strategyName() {
+    return this.#strategy.name;
   }
 
   /**
@@ -691,6 +749,7 @@ export function extractTextFromDOM(document, rootNode, options) {
     text: context.textContent.trim(),
     links: context.links,
     canvases: context.canvases,
+    siteStrategy: context.strategyName,
   };
 }
 

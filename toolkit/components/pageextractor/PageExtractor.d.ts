@@ -38,6 +38,9 @@ export type DOMExtractionResult = {
   text: string;
   links: string[];
   canvases: HTMLCanvasElement[];
+  // The site-specific strategy applied (e.g. "google-search", "youtube", or
+  // "default"), for telemetry/marker use.
+  siteStrategy: string;
 };
 
 export type ExtractionResult = {

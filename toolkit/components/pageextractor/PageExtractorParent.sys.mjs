@@ -21,6 +21,8 @@ const lazy = XPCOMUtils.declareLazy({
     }),
   collapseWhitespace:
     "moz-src:///toolkit/components/pageextractor/DOMExtractor.sys.mjs",
+  PageExtractorEvent:
+    "moz-src:///toolkit/components/pageextractor/PageExtractorEvents.sys.mjs",
   setTimeout: "resource://gre/modules/Timer.sys.mjs",
   clearTimeout: "resource://gre/modules/Timer.sys.mjs",
   headlessTimeoutMs: {
@@ -60,10 +62,26 @@ export class PageExtractorParent extends JSWindowActorParent {
    * Waits for DOMContentLoaded.
    *
    * @see PageExtractorChild#waitForPageReady
+   *
+   * @param {string} [flowId] - Correlates this call with the profiler marker
+   *   and telemetry event of an enclosing headless-extractor request. Internal
+   *   use only, not a public GetTextOptions field: mints its own when omitted.
    * @returns {Promise<void>}
    */
-  waitForPageReady() {
-    return this.sendQuery("PageExtractorParent:WaitForPageReady");
+  async waitForPageReady(flowId) {
+    const event = this.#startEvent("wait-for-ready", { flowId });
+    try {
+      const { status } = await this.sendQuery(
+        "PageExtractorParent:WaitForPageReady",
+        {
+          flowId: event.flowId,
+        }
+      );
+      event.finish({ status });
+    } catch (error) {
+      event.finish({ status: "error", errorName: error.name });
+      throw error;
+    }
   }
 
   /**
@@ -73,8 +91,22 @@ export class PageExtractorParent extends JSWindowActorParent {
    *
    * @returns {Promise<PageMetadata>}
    */
-  getPageMetadata() {
-    return this.sendQuery("PageExtractorParent:GetPageMetadata");
+  async getPageMetadata() {
+    const event = this.#startEvent("get-page-metadata");
+    try {
+      const response = await this.sendQuery(
+        "PageExtractorParent:GetPageMetadata",
+        {
+          flowId: event.flowId,
+        }
+      );
+      const { result, eventData } = response;
+      event.finish({ status: "success", ...eventData });
+      return result;
+    } catch (error) {
+      event.finish({ status: "error", errorName: error.name });
+      throw error;
+    }
   }
 
   /**
@@ -84,49 +116,93 @@ export class PageExtractorParent extends JSWindowActorParent {
    * @see PageExtractorChild#getText
    *
    * @param {Partial<GetTextOptions>} options
+   * @param {string} [flowId] - Correlates this call with the profiler marker
+   *   and telemetry event of an enclosing headless-extractor request. Internal
+   *   use only, not a public GetTextOptions field: mints its own when omitted.
    * @returns {Promise<ExtractionResult | null>}
    */
-  async getText(options = {}) {
+  async getText(options = {}, flowId) {
     if (options._forceRemoveBoilerplate && !Cu.isInAutomation) {
       throw new Error(
         "The _forceRemoveBoilerplate option from GetTextOptions can only be used in tests."
       );
     }
 
-    if (this.#isPDF()) {
-      return this.#getTextFromPDF(options);
-    }
+    const event = this.#startEvent("get-text", { options, flowId });
+    try {
+      if (this.#isPDF()) {
+        const result = await this.#getTextFromPDF(options, event.flowId);
+        event.finish({
+          status: "success",
+          strategy: "pdf",
+          textLength: result.text.length,
+          linkCount: result.links.length,
+          canvasCount: result.canvasSnapshots.length,
+        });
+        return result;
+      }
 
-    return this.sendQuery("PageExtractorParent:GetText", options);
+      const response = await this.sendQuery("PageExtractorParent:GetText", {
+        options,
+        flowId: event.flowId,
+      });
+      if (!response) {
+        event.finish({ status: "unavailable" });
+        return null;
+      }
+      const { result, eventData } = response;
+      event.finish({
+        status: "success",
+        ...eventData,
+        textLength: result.text.length,
+        linkCount: result.links.length,
+        canvasCount: result.canvasSnapshots.length,
+      });
+      return result;
+    } catch (error) {
+      event.finish({ status: "error", errorName: error.name });
+      throw error;
+    }
   }
 
   /**
    * Call out to pdf.js to get the text content and apply the GetTextOptions.
    *
    * @param {GetTextOptions} options
+   * @param {string | undefined} flowId
    */
-  async #getTextFromPDF(options) {
-    let text = await this.browsingContext.currentWindowGlobal
-      .getActor("Pdfjs")
-      .getTextContent();
+  async #getTextFromPDF(options, flowId) {
+    const event = this.#startEvent("pdf-extract", {
+      flowId,
+      strategy: "pdf",
+    });
+    try {
+      let text = await this.browsingContext.currentWindowGlobal
+        .getActor("Pdfjs")
+        .getTextContent();
 
-    if (options.sufficientLength && text.length > options.sufficientLength) {
-      // Try to cut at a sentence boundary within the last 100 characters of the
-      // end.
-      //
-      // TODO(Bug 2023932) Make this internationalized, splitting on a "." only works
-      // in certain scripts like Latin.
-      const truncatePoint = text.lastIndexOf(".", options.sufficientLength);
-      if (truncatePoint > options.sufficientLength - 100) {
-        text = text.substring(0, truncatePoint + 1);
-      } else {
-        text = text.substring(0, options.sufficientLength) + "…";
+      if (options.sufficientLength && text.length > options.sufficientLength) {
+        // Try to cut at a sentence boundary within the last 100 characters of the
+        // end.
+        //
+        // TODO(Bug 2023932) Make this internationalized, splitting on a "." only works
+        // in certain scripts like Latin.
+        const truncatePoint = text.lastIndexOf(".", options.sufficientLength);
+        if (truncatePoint > options.sufficientLength - 100) {
+          text = text.substring(0, truncatePoint + 1);
+        } else {
+          text = text.substring(0, options.sufficientLength) + "…";
+        }
       }
+
+      text = lazy.collapseWhitespace(text).trim();
+
+      event.finish({ status: "success", textLength: text.length });
+      return { text, links: [], canvasSnapshots: [] };
+    } catch (error) {
+      event.finish({ status: "error", errorName: error.name });
+      throw error;
     }
-
-    text = lazy.collapseWhitespace(text).trim();
-
-    return { text, links: [], canvasSnapshots: [] };
   }
 
   #isPDF() {
@@ -134,6 +210,19 @@ export class PageExtractorParent extends JSWindowActorParent {
       this.browsingContext.currentWindowGlobal.documentPrincipal
         .originNoSuffix == "resource://pdf.js"
     );
+  }
+
+  /**
+   * @param {string} phase
+   * @param {Record<string, any>} [data]
+   */
+  #startEvent(phase, data = {}) {
+    return new lazy.PageExtractorEvent(phase, {
+      process: "parent",
+      innerWindowId:
+        this.browsingContext?.currentWindowGlobal?.innerWindowId ?? 0,
+      ...data,
+    });
   }
 
   /**
@@ -146,7 +235,10 @@ export class PageExtractorParent extends JSWindowActorParent {
    *
    * @param {object} options
    * @param {string} options.urlString
-   * @param {(actor: PageExtractorParent) => Promise<T>} options.callback
+   * @param {(actor: PageExtractorParent, flowId: string) => Promise<T>} options.callback
+   *   Called with the actor once the headless page is ready, and the flowId
+   *   correlating this headless-extractor request so a follow-up
+   *   `actor.getText(options, flowId)` call ties back to the same request.
    * @param {boolean} [options.anonymousFetch]
    * @returns {Promise<T>}
    */
@@ -171,165 +263,198 @@ export class PageExtractorParent extends JSWindowActorParent {
         );
       }
     }
+    const event = new lazy.PageExtractorEvent("headless-extractor", {
+      process: "parent",
+      strategy: anonymousFetch ? "headless-anonymous" : "headless",
+    });
+    const { flowId } = event;
+
+    // Covers navigating the hidden browser to the URL and waiting for that
+    // navigation to commit (onLocationChange), i.e. everything before the
+    // page-ready wait even starts. Finished exactly once, from whichever of
+    // the three outcomes (navigation commits, the actor lookup throws, or
+    // the load times out) happens first; finish() itself ignores the two
+    // that lose the race.
+    const navigateEvent = new lazy.PageExtractorEvent("headless-navigate", {
+      process: "parent",
+      flowId,
+    });
+
     // The hidden browser manager controls the lifetime of the hidden browser.
-    return lazy.HiddenBrowserManager.withHiddenBrowser(
-      async browser => {
-        if (anonymousFetch) {
-          // The goal of these settings is to fetch the page without sending
-          // any user data to the origin and without letting the visit affect
-          // the user's browsing profile (history, cache, trackers, etc).
+    try {
+      const result = await lazy.HiddenBrowserManager.withHiddenBrowser(
+        async browser => {
+          if (anonymousFetch) {
+            // The goal of these settings is to fetch the page without sending
+            // any user data to the origin and without letting the visit affect
+            // the user's browsing profile (history, cache, trackers, etc).
 
-          // Keep the visit out of browsing history
-          // TODO (bug 2043254) - Move this into the HiddenBrowserManager so all hidden browsers don't affect global history.
-          browser.setAttribute("disableglobalhistory", "true");
-          // Suppress audio output from the loaded page.
-          browser.browsingContext?.mediaController?.mute();
-          browser.addEventListener("DidChangeBrowserRemoteness", () =>
-            browser.browsingContext?.mediaController?.mute()
-          );
-          const { browsingContext } = browser;
-          // Tracking Protection so third-party trackers on the page cannot profile the request or correlate it with the user.
-          browsingContext.useTrackingProtection = true;
-          browsingContext.defaultLoadFlags =
-            // Strip cookies, HTTP auth, and other credentials from the request
-            Ci.nsIRequest.LOAD_ANONYMOUS |
-            // Don't write the response into the user's memory cache
-            Ci.nsIRequest.INHIBIT_CACHING |
-            // Don't write the response into the user's persistent (disk) cache
-            Ci.nsIRequest.INHIBIT_PERSISTENT_CACHING;
-          // Restrict what the loaded page can do.
-          browsingContext.sandboxFlags |=
-            SANDBOXED_AUXILIARY_NAVIGATION |
-            SANDBOXED_TOPLEVEL_NAVIGATION |
-            SANDBOXED_FORMS |
-            SANDBOXED_POINTER_LOCK |
-            SANDBOXED_AUTOMATIC_FEATURES |
-            SANDBOXED_MODALS |
-            SANDBOXED_ORIENTATION_LOCK |
-            SANDBOXED_PRESENTATION |
-            SANDBOXED_STORAGE_ACCESS |
-            SANDBOXED_DOWNLOADS;
-        }
-
-        const { host } = url;
-
-        /** @type {PromiseWithResolvers<PageExtractorParent>} */
-        let actorResolver = Promise.withResolvers();
-
-        const locationChangeFlags = Ci.nsIWebProgress.NOTIFY_LOCATION;
-        const onLocationChange = {
-          QueryInterface: ChromeUtils.generateQI([
-            "nsIWebProgressListener",
-            "nsISupportsWeakReference",
-          ]),
-          /**
-           * @param {nsIWebProgress} webProgress
-           * @param {nsIRequest} _request
-           * @param {nsIURI} location
-           * @param {number} _flags
-           */
-          onLocationChange(webProgress, _request, location, _flags) {
-            if (!webProgress.isTopLevel) {
-              lazy.console.log(
-                "Headless browser had a non-top level location change."
-              );
-              return;
-            }
-            if (URL.fromURI(location).host != host) {
-              lazy.console.log(
-                "A location change happened that wasn't the host.",
-                location.host,
-                host
-              );
-              // This is probably overkill, but make sure this is not a spurious
-              // redirect.
-              return;
-            }
-            browser.removeProgressListener(
-              onLocationChange,
-              locationChangeFlags
+            // Keep the visit out of browsing history
+            // TODO (bug 2043254) - Move this into the HiddenBrowserManager so all hidden browsers don't affect global history.
+            browser.setAttribute("disableglobalhistory", "true");
+            // Suppress audio output from the loaded page.
+            browser.browsingContext?.mediaController?.mute();
+            browser.addEventListener("DidChangeBrowserRemoteness", () =>
+              browser.browsingContext?.mediaController?.mute()
             );
+            const { browsingContext } = browser;
+            // Tracking Protection so third-party trackers on the page cannot profile the request or correlate it with the user.
+            browsingContext.useTrackingProtection = true;
+            browsingContext.defaultLoadFlags =
+              // Strip cookies, HTTP auth, and other credentials from the request
+              Ci.nsIRequest.LOAD_ANONYMOUS |
+              // Don't write the response into the user's memory cache
+              Ci.nsIRequest.INHIBIT_CACHING |
+              // Don't write the response into the user's persistent (disk) cache
+              Ci.nsIRequest.INHIBIT_PERSISTENT_CACHING;
+            // Restrict what the loaded page can do.
+            browsingContext.sandboxFlags |=
+              SANDBOXED_AUXILIARY_NAVIGATION |
+              SANDBOXED_TOPLEVEL_NAVIGATION |
+              SANDBOXED_FORMS |
+              SANDBOXED_POINTER_LOCK |
+              SANDBOXED_AUTOMATIC_FEATURES |
+              SANDBOXED_MODALS |
+              SANDBOXED_ORIENTATION_LOCK |
+              SANDBOXED_PRESENTATION |
+              SANDBOXED_STORAGE_ACCESS |
+              SANDBOXED_DOWNLOADS;
+          }
 
-            /** @type {any} - This is reported as an `Element`, but it's a <browser> */
-            const topBrowser = webProgress.browsingContext.topFrameElement;
+          const { host } = url;
 
-            try {
-              const actor =
-                topBrowser.browsingContext.currentWindowGlobal.getActor(
-                  "PageExtractor"
+          /** @type {PromiseWithResolvers<PageExtractorParent>} */
+          let actorResolver = Promise.withResolvers();
+
+          const locationChangeFlags = Ci.nsIWebProgress.NOTIFY_LOCATION;
+          const onLocationChange = {
+            QueryInterface: ChromeUtils.generateQI([
+              "nsIWebProgressListener",
+              "nsISupportsWeakReference",
+            ]),
+            /**
+             * @param {nsIWebProgress} webProgress
+             * @param {nsIRequest} _request
+             * @param {nsIURI} location
+             * @param {number} _flags
+             */
+            onLocationChange(webProgress, _request, location, _flags) {
+              if (!webProgress.isTopLevel) {
+                lazy.console.log(
+                  "Headless browser had a non-top level location change."
                 );
-
-              actor.waitForPageReady().then(
-                () => {
-                  lazy.console.log("Headless PageExtractor is ready", url);
-                  actorResolver.resolve(actor);
-                },
-                error => actorResolver.reject(error)
+                return;
+              }
+              if (URL.fromURI(location).host != host) {
+                lazy.console.log(
+                  "A location change happened that wasn't the host.",
+                  location.host,
+                  host
+                );
+                // This is probably overkill, but make sure this is not a spurious
+                // redirect.
+                return;
+              }
+              browser.removeProgressListener(
+                onLocationChange,
+                locationChangeFlags
               );
-            } catch (error) {
-              // TODO (Bug 2001385) - It would be nice to catch if this is the
-              // `about:neterror` page or other similar errors. This will also fail if you
-              // try to access something like `about:reader` with the same error.
-              actorResolver.reject(
-                new Error(
-                  "PageExtractor could not run on that page or the page could not be found."
-                )
-              );
-            }
-          },
-        };
 
-        browser.addProgressListener(onLocationChange, locationChangeFlags);
+              /** @type {any} - This is reported as an `Element`, but it's a <browser> */
+              const topBrowser = webProgress.browsingContext.topFrameElement;
 
-        lazy.console.log("Loading a headless PageExtractor", url);
+              try {
+                const actor =
+                  topBrowser.browsingContext.currentWindowGlobal.getActor(
+                    "PageExtractor"
+                  );
 
-        /** @type {LoadURIOptions} */
-        const loadURIOptions = {
-          triggeringPrincipal:
-            Services.scriptSecurityManager.createNullPrincipal({}),
-        };
-        if (anonymousFetch) {
-          // Suppress the Referer header so the origin can't learn where the
-          // request came from (e.g. the SERP page that surfaced this URL).
-          const referrerInfo = Cc[
-            "@mozilla.org/referrer-info;1"
-          ].createInstance(Ci.nsIReferrerInfo);
-          referrerInfo.init(Ci.nsIReferrerInfo.NO_REFERRER, true, null);
-          loadURIOptions.referrerInfo = referrerInfo;
-          // Don't add an entry for this load to session history.
-          loadURIOptions.loadFlags =
-            Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_HISTORY;
+                navigateEvent.finish({ status: "success" });
+                actor.waitForPageReady(flowId).then(
+                  () => {
+                    lazy.console.log("Headless PageExtractor is ready", url);
+                    actorResolver.resolve(actor);
+                  },
+                  error => actorResolver.reject(error)
+                );
+              } catch (error) {
+                // TODO (Bug 2001385) - It would be nice to catch if this is the
+                // `about:neterror` page or other similar errors. This will also fail if you
+                // try to access something like `about:reader` with the same error.
+                navigateEvent.finish({
+                  status: "error",
+                  errorName: error.name,
+                });
+                actorResolver.reject(
+                  new Error(
+                    "PageExtractor could not run on that page or the page could not be found."
+                  )
+                );
+              }
+            },
+          };
+
+          browser.addProgressListener(onLocationChange, locationChangeFlags);
+
+          lazy.console.log("Loading a headless PageExtractor", url);
+
+          /** @type {LoadURIOptions} */
+          const loadURIOptions = {
+            triggeringPrincipal:
+              Services.scriptSecurityManager.createNullPrincipal({}),
+          };
+          if (anonymousFetch) {
+            // Suppress the Referer header so the origin can't learn where the
+            // request came from (e.g. the SERP page that surfaced this URL).
+            const referrerInfo = Cc[
+              "@mozilla.org/referrer-info;1"
+            ].createInstance(Ci.nsIReferrerInfo);
+            referrerInfo.init(Ci.nsIReferrerInfo.NO_REFERRER, true, null);
+            loadURIOptions.referrerInfo = referrerInfo;
+            // Don't add an entry for this load to session history.
+            loadURIOptions.loadFlags =
+              Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_HISTORY;
+          }
+
+          browser.loadURI(url.URI, loadURIOptions);
+
+          // The load may never commit on the requested host: the network can
+          // stall, or bot detection can redirect to a challenge page elsewhere.
+          const timeoutMs = lazy.headlessTimeoutMs;
+          const timeoutId = lazy.setTimeout(() => {
+            navigateEvent.finish({
+              status: "error",
+              errorName: "TimeoutError",
+            });
+            actorResolver.reject(
+              new DOMException(
+                `The page did not load in a headless browser within ${timeoutMs}ms: ${url.href}`,
+                "TimeoutError"
+              )
+            );
+          }, timeoutMs);
+
+          let actor;
+          try {
+            actor = await actorResolver.promise;
+          } finally {
+            lazy.clearTimeout(timeoutId);
+          }
+
+          return callback(actor, flowId);
+        },
+        {
+          // Create a custom message manager group for this browser so that the PageExtractor
+          // actor can communicate with it. The actor is registered to use this custom
+          // message manager group.
+          messageManagerGroup: "headless-browsers",
         }
-
-        browser.loadURI(url.URI, loadURIOptions);
-
-        // The load may never commit on the requested host: the network can
-        // stall, or bot detection can redirect to a challenge page elsewhere.
-        const timeoutMs = lazy.headlessTimeoutMs;
-        const timeoutId = lazy.setTimeout(() => {
-          actorResolver.reject(
-            new DOMException(
-              `The page did not load in a headless browser within ${timeoutMs}ms: ${url.href}`,
-              "TimeoutError"
-            )
-          );
-        }, timeoutMs);
-
-        let actor;
-        try {
-          actor = await actorResolver.promise;
-        } finally {
-          lazy.clearTimeout(timeoutId);
-        }
-
-        return callback(actor);
-      },
-      {
-        // Create a custom message manager group for this browser so that the PageExtractor
-        // actor can communicate with it. The actor is registered to use this custom
-        // message manager group.
-        messageManagerGroup: "headless-browsers",
-      }
-    );
+      );
+      event.finish({ status: "success" });
+      return result;
+    } catch (error) {
+      event.finish({ status: "error", errorName: error.name });
+      throw error;
+    }
   }
 }
