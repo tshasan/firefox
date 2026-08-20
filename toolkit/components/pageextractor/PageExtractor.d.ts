@@ -42,6 +42,9 @@ export type DOMExtractionResult = {
   text: string;
   links: string[];
   canvases: HTMLCanvasElement[];
+  // Surfaced separately from the extracted text so PageExtractorChild can
+  // attach it to profiler markers without re-deriving it from sourceUrl.
+  siteStrategy: string | null;
 };
 
 export type ExtractionResult = {

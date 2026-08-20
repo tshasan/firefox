@@ -33,6 +33,8 @@ const lazy = XPCOMUtils.declareLazy({
     "moz-src:///toolkit/components/pageextractor/YouTubeExtraction.sys.mjs",
   getYouTubeContent:
     "moz-src:///toolkit/components/pageextractor/YouTubeExtraction.sys.mjs",
+  PageExtractorEvent:
+    "moz-src:///toolkit/components/pageextractor/PageExtractorEvents.sys.mjs",
   isProbablyReaderable: "resource://gre/modules/Readerable.sys.mjs",
   youtubeTimeoutMs: {
     pref: "browser.pageextractor.youtube.timeoutMs",
@@ -62,30 +64,17 @@ export class PageExtractorChild extends JSWindowActorChild {
    */
   async receiveMessage({ name, data }) {
     switch (name) {
-      case "PageExtractorParent:GetText":
+      case "PageExtractorParent:GetText": {
+        const { options, flowId } = data;
         if (!this.#isPageReady) {
-          await this.waitForPageReady();
+          await this.waitForPageReady(flowId);
         }
-        return this.getText(data);
+        return this.getText(options, flowId);
+      }
       case "PageExtractorParent:WaitForPageReady":
-        return this.waitForPageReady();
+        return this.waitForPageReady(data?.flowId);
       case "PageExtractorParent:GetPageMetadata":
-        if (this.isAboutReader()) {
-          const document = this.browsingContext?.window?.document;
-          const result = await this.getText({ removeBoilerplate: true });
-          const text = result?.text ?? "";
-          const language = document?.querySelector(".container")?.lang ?? "";
-          const wordCount = this.#getWordCount(language, text);
-
-          return {
-            structuredDataTypes: [],
-            wordCount,
-            language,
-            isReaderable: true,
-            isGated: false,
-          };
-        }
-        return this.getPageMetadata();
+        return this.#getPageMetadata(data?.flowId);
     }
     return Promise.reject(new Error("Unknown message: " + name));
   }
@@ -95,32 +84,70 @@ export class PageExtractorChild extends JSWindowActorChild {
    * requestAnimationFrame so layout and paint are committed before
    * extraction reads page geometry.
    *
+   * @param {string | undefined} flowId
    * @returns {Promise<void>}
    */
-  async waitForPageReady() {
+  async waitForPageReady(flowId) {
+    const event = this.#startEvent("wait-for-ready", { flowId });
     const doc = this.document;
     const win = doc.documentGlobal;
+    return event.run(async () => {
+      if (doc.readyState == "loading") {
+        await new Promise(resolve => {
+          doc.addEventListener("DOMContentLoaded", resolve, { once: true });
+        });
+      } else {
+        lazy.console.log("The page is already interactive");
+      }
 
-    if (doc.readyState == "loading") {
       await new Promise(resolve => {
-        doc.addEventListener("DOMContentLoaded", resolve, { once: true });
+        win.requestIdleCallback(resolve, {
+          timeout: MAX_REQUEST_IDLE_CALLBACK_DELAY_MS,
+        });
       });
-    } else {
-      lazy.console.log("The page is already interactive");
-    }
 
-    await new Promise(resolve => {
-      win.requestIdleCallback(resolve, {
-        timeout: MAX_REQUEST_IDLE_CALLBACK_DELAY_MS,
-      });
+      const wasHidden = doc.hidden;
+      if (!wasHidden) {
+        await new Promise(resolve => {
+          win.requestAnimationFrame(() => win.requestAnimationFrame(resolve));
+        });
+      }
+
+      event.finish({ status: wasHidden ? "document-hidden" : "success" });
     });
+  }
 
-    if (doc.hidden) {
-      return;
-    }
-
-    await new Promise(resolve => {
-      win.requestAnimationFrame(() => win.requestAnimationFrame(resolve));
+  /**
+   * @param {string | undefined} flowId
+   * @returns {Promise<PageMetadata>}
+   */
+  async #getPageMetadata(flowId) {
+    const event = this.#startEvent("get-page-metadata", { flowId });
+    return event.run(async () => {
+      let result;
+      let strategy;
+      if (this.isAboutReader()) {
+        const document = this.browsingContext?.window?.document;
+        const extraction = await this.getText(
+          { removeBoilerplate: true },
+          flowId
+        );
+        const text = extraction?.text ?? "";
+        const language = document?.querySelector(".container")?.lang ?? "";
+        result = {
+          structuredDataTypes: [],
+          wordCount: this.#getWordCount(language, text),
+          language,
+          isReaderable: true,
+          isGated: false,
+        };
+        strategy = "about-reader";
+      } else {
+        result = await this.getPageMetadata();
+        strategy = "dom";
+      }
+      event.addData({ strategy });
+      return result;
     });
     this.#isPageReady = true;
   }
@@ -288,125 +315,206 @@ export class PageExtractorChild extends JSWindowActorChild {
    * @see PageExtractorParent#getText for docs
    *
    * @param {GetTextOptions} options
+   * @param {string | undefined} flowId
    * @returns {Promise<ExtractionResult | null>}
    */
-  async getText(options = {}) {
-    const window = this.browsingContext?.window;
-    /** @type {Document} */
-    let document = window?.document;
-    /** @type {HTMLElement} */
-    let rootNode;
+  async getText(options = {}, flowId) {
+    const event = this.#startEvent("get-text", {
+      flowId,
+      options,
+      strategy: "dom",
+    });
+    return event.run(async () => {
+      let strategy = "dom";
+      const window = this.browsingContext?.window;
+      /** @type {Document} */
+      let document = window?.document;
+      /** @type {HTMLElement} */
+      let rootNode;
 
-    // YouTube extraction is a best-effort enhancement: any failure is logged
-    // and degrades to an empty string so the generic page extraction is used.
-    let youtubeContentPromise = null;
-    const sourceUrl = URL.parse(options.sourceUrl);
-    if (lazy.shouldExtractYouTube(sourceUrl)) {
-      youtubeContentPromise = lazy
-        .getYouTubeContent(document, {
-          timeoutMs: lazy.youtubeTimeoutMs,
-          sufficientLength: options.sufficientLength,
-          currentVideoId: sourceUrl.searchParams.get("v"),
-        })
-        .catch(error => {
-          lazy.console.warn?.("Failed to extract YouTube content", error);
-          return { text: "", replacesContent: false };
+      // YouTube extraction is a best-effort enhancement: any failure is logged
+      // and degrades to an empty string so the generic page extraction is used.
+      let youtubeContentPromise = null;
+      const sourceUrl = URL.parse(options.sourceUrl);
+      if (lazy.shouldExtractYouTube(sourceUrl)) {
+        const youtubeEvent = this.#startEvent("youtube-extract", {
+          flowId: event.flowId,
+          strategy: "youtube",
         });
-    }
-
-    if (this.isAboutReader()) {
-      // If about:reader is loaded, find the proper rootNode so that we just get the
-      // content and not any of the UI. This will get passed to DOMExtractor so that
-      // the rest of the GetTextOptions can be applied.
-
-      lazy.console.log("Extracting content from about:reader");
-      // TODO - Explain what's different between this document and the browsing context.
-      document = this.manager.contentWindow.document;
-
-      if (!document) {
-        lazy.console.log("No content document was available");
-        return null;
+        youtubeContentPromise = youtubeEvent
+          .run(async () => {
+            const result = await lazy.getYouTubeContent(document, {
+              timeoutMs: lazy.youtubeTimeoutMs,
+              sufficientLength: options.sufficientLength,
+              currentVideoId: sourceUrl.searchParams.get("v"),
+            });
+            youtubeEvent.finish({
+              status: result.text ? "success" : "empty",
+              textLength: result.text.length,
+            });
+            return result;
+          })
+          .catch(error => {
+            lazy.console.warn("Failed to extract YouTube content", error);
+            return { text: "", replacesContent: false };
+          });
       }
 
-      /** @type {HTMLElement?} */
-      rootNode = document.querySelector(".container");
-      if (!rootNode) {
-        lazy.console.log("No container was found in reader mode.");
-        return null;
-      }
-    } else if (options.removeBoilerplate) {
-      // Boilerplate removal is requested. See if reader mode can be applied, and then
-      // use that for boilerplate removal.
+      if (this.isAboutReader()) {
+        strategy = "about-reader";
+        event.addData({ strategy });
+        // If about:reader is loaded, find the proper rootNode so that we just get the
+        // content and not any of the UI. This will get passed to DOMExtractor so that
+        // the rest of the GetTextOptions can be applied.
 
-      if (
-        (document && lazy.isProbablyReaderable(document)) ||
-        options._forceRemoveBoilerplate
-      ) {
-        // Run the document through reader mode, and use the DOMParser version of the
-        // content.
-        /** @type {ReaderModeDocument | null} */
-        const readerModeDocument =
-          await lazy.ReaderMode.parseDocument(document);
-        if (readerModeDocument) {
-          lazy.console.log("Document is readerable");
-          const { content } = readerModeDocument;
-          const parser = new DOMParser();
-          document = parser.parseFromString(content, "text/html");
-          rootNode = document.body;
+        lazy.console.log("Extracting content from about:reader");
+        // TODO - Explain what's different between this document and the browsing context.
+        document = this.manager.contentWindow.document;
+
+        if (!document) {
+          lazy.console.log("No content document was available");
+          event.finish({ status: "unavailable" });
+          return null;
+        }
+
+        /** @type {HTMLElement?} */
+        rootNode = document.querySelector(".container");
+        if (!rootNode) {
+          lazy.console.log("No container was found in reader mode.");
+          event.finish({ status: "unavailable" });
+          return null;
+        }
+      } else if (options.removeBoilerplate) {
+        // Boilerplate removal is requested. See if reader mode can be applied, and then
+        // use that for boilerplate removal.
+
+        if (
+          (document && lazy.isProbablyReaderable(document)) ||
+          options._forceRemoveBoilerplate
+        ) {
+          // Run the document through reader mode, and use the DOMParser version of the
+          // content.
+          const readerEvent = this.#startEvent("reader-parse", {
+            flowId: event.flowId,
+            strategy: "reader",
+          });
+          /** @type {ReaderModeDocument | null} */
+          const readerModeDocument = await readerEvent.run(async () => {
+            const result = await lazy.ReaderMode.parseDocument(document);
+            readerEvent.finish({ status: result ? "success" : "unavailable" });
+            return result;
+          });
+          if (readerModeDocument) {
+            strategy = "reader";
+            event.addData({ strategy });
+            lazy.console.log("Document is readerable");
+            const outputEvent = this.#startEvent("reader-output-parse", {
+              flowId: event.flowId,
+              strategy,
+            });
+            document = new DOMParser().parseFromString(
+              readerModeDocument.content,
+              "text/html"
+            );
+            outputEvent.finish({ status: "success" });
+            rootNode = document.body;
+          } else {
+            lazy.console.log(
+              "Document is not readerable, boilerplate will not be removed"
+            );
+          }
         } else {
           lazy.console.log(
             "Document is not readerable, boilerplate will not be removed"
           );
         }
-      } else {
-        lazy.console.log(
-          "Document is not readerable, boilerplate will not be removed"
+      }
+
+      if (!document || !rootNode) {
+        lazy.console.log("Extracting content without boilerplate removal.");
+        // No document or no root node is here, we should use the default extraction
+        // strategy, of getting content directly from the hpage.
+        document = window?.document;
+        rootNode = document.body;
+      }
+
+      if (!document) {
+        lazy.console.log("No document was found.");
+        event.finish({ status: "unavailable" });
+        return null;
+      }
+
+      // All of the content gets extracted using the DOMExtractor, which knows how
+      // to apply certain settings in GetTextOptions.
+      const domEvent = this.#startEvent("dom-extract", {
+        flowId: event.flowId,
+        strategy,
+      });
+      const extraction = await domEvent.run(() => {
+        const result = lazy.extractTextFromDOM(document, rootNode, options);
+        domEvent.addData({
+          textLength: result.text.length,
+          linkCount: result.links.length,
+          canvasCount: result.canvases.length,
+          siteStrategy: result.siteStrategy,
+        });
+        return result;
+      });
+      const { text, links, canvases } = extraction;
+      if (extraction.siteStrategy) {
+        event.addData({ siteStrategy: extraction.siteStrategy });
+      }
+
+      let canvasSnapshots = [];
+      if (options.includeCanvasSnapshots && canvases.length) {
+        canvasSnapshots = await this.#captureCanvases(
+          canvases,
+          options,
+          event.flowId
         );
       }
-    }
 
-    if (!document || !rootNode) {
-      lazy.console.log("Extracting content without boilerplate removal.");
-      // No document or no root node is here, we should use the default extraction
-      // strategy, of getting content directly from the hpage.
-      document = window?.document;
-      rootNode = document.body;
-    }
+      // On YouTube a transcript block replaces the generic walk. Without
+      // a transcript the generic walk is kept (so comments and other page content
+      // survive) and the clean metadata block (header fields + description), which
+      // that walk only captures noisily and truncated, is prepended to it.
+      const youtube = youtubeContentPromise
+        ? await youtubeContentPromise
+        : null;
+      let finalText = text;
+      if (youtube?.text) {
+        finalText = youtube.replacesContent
+          ? youtube.text
+          : [youtube.text, text].filter(Boolean).join("\n\n");
+        strategy = youtube.replacesContent
+          ? "youtube-transcript"
+          : "youtube-dom";
+        event.addData({ strategy });
+      }
 
-    if (!document) {
-      lazy.console.log("No document was found.");
-      return null;
-    }
+      lazy.console.log("GetText", options);
+      lazy.console.debug({ text: finalText, links, canvasSnapshots });
 
-    // All of the content gets extracted using the DOMExtractor, which knows how
-    // to apply certain settings in GetTextOptions.
-    const { text, links, canvases } = lazy.extractTextFromDOM(
-      document,
-      rootNode,
-      options
-    );
+      event.finish({
+        status: "success",
+        textLength: finalText.length,
+        linkCount: links.length,
+        canvasCount: canvasSnapshots.length,
+      });
+      return { text: finalText, links, canvasSnapshots };
+    });
+  }
 
-    let canvasSnapshots = [];
-    if (options.includeCanvasSnapshots && canvases.length) {
-      canvasSnapshots = await this.#captureCanvases(canvases, options);
-    }
-
-    // On YouTube a transcript block replaces the generic walk. Without
-    // a transcript the generic walk is kept (so comments and other page content
-    // survive) and the clean metadata block (header fields + description), which
-    // that walk only captures noisily and truncated, is prepended to it.
-    const youtube = youtubeContentPromise ? await youtubeContentPromise : null;
-    let finalText = text;
-    if (youtube?.text) {
-      finalText = youtube.replacesContent
-        ? youtube.text
-        : [youtube.text, text].filter(Boolean).join("\n\n");
-    }
-
-    lazy.console.log("GetText", options);
-    lazy.console.debug({ text: finalText, links, canvasSnapshots });
-
-    return { text: finalText, links, canvasSnapshots };
+  /**
+   * @param {string} phase
+   * @param {Record<string, any>} [data]
+   */
+  #startEvent(phase, data = {}) {
+    return new lazy.PageExtractorEvent(phase, {
+      process: "content",
+      innerWindowId: this.contentWindow?.windowGlobalChild?.innerWindowId ?? 0,
+      ...data,
+    });
   }
 
   /**
@@ -428,16 +536,22 @@ export class PageExtractorChild extends JSWindowActorChild {
    *
    * @param {HTMLCanvasElement[]} canvases
    * @param {GetTextOptions} options
+   * @param {string | undefined} flowId
    * @returns {Promise<CanvasSnapshot[]>}
    */
-  async #captureCanvases(canvases, options) {
+  async #captureCanvases(canvases, options, flowId) {
+    const event = this.#startEvent("canvas-capture", { flowId });
     const maxDimension = options.maxCanvasDimension ?? 1024;
     const quality = options.canvasQuality ?? 0.8;
 
-    const results = await Promise.all(
-      canvases.map(c => this.#captureCanvas(c, maxDimension, quality))
-    );
-    return results.filter(Boolean);
+    return event.run(async () => {
+      const results = await Promise.all(
+        canvases.map(c => this.#captureCanvas(c, maxDimension, quality))
+      );
+      const snapshots = results.filter(Boolean);
+      event.finish({ status: "success", canvasCount: snapshots.length });
+      return snapshots;
+    });
   }
 
   /**
