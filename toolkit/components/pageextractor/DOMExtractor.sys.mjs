@@ -27,18 +27,21 @@ const OPEN_PAREN_REGEX = /\(/g;
 const CLOSE_PAREN_REGEX = /\)/g;
 
 const DEFAULT_STRATEGY = {
+  name: null,
   filterSelector: null,
   formatBlockAnchorsAsMarkdown: false,
   formatBlockAnchorSelector: null,
 };
 
 const GOOGLE_SEARCH_STRATEGY = {
+  name: "google-search",
   filterSelector: "cite",
   formatBlockAnchorsAsMarkdown: true,
   formatBlockAnchorSelector: "cite",
 };
 
 const YOUTUBE_STRATEGY = {
+  name: "youtube",
   filterSelector: [
     "transcript-segment-view-model",
     "ytd-transcript-segment-renderer",
@@ -146,6 +149,16 @@ class ExtractionContext {
     if (options.sourceUrl) {
       this.#strategy = getStrategyForUrl(URL.parse(options.sourceUrl));
     }
+  }
+
+  /**
+   * Exposes #strategy's name so callers can attach it to profiler markers
+   * without leaking the strategy object itself.
+   *
+   * @returns {string | null}
+   */
+  get strategyName() {
+    return this.#strategy.name;
   }
 
   /**
@@ -699,6 +712,7 @@ export function extractTextFromDOM(document, rootNode, options) {
     text,
     links: context.links,
     canvases: context.canvases,
+    siteStrategy: context.strategyName,
   };
 }
 
