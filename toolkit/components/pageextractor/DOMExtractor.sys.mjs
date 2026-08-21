@@ -9,7 +9,7 @@
  */
 
 /**
- * @import { GetTextOptions, DOMExtractionResult, ExtractionStrategy } from './PageExtractor.d.ts'
+ * @import { GetTextOptions, DOMExtractionResult, ExtractionStrategy, DebugLayoutBlock } from './PageExtractor.d.ts'
  */
 
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
@@ -165,6 +165,33 @@ class ExtractionContext {
   #viewportRect = null;
 
   /**
+   * Populated only when GetTextOptions._debugLayout is set, for debug
+   * tooling that visualizes what extractTextFromDOM() considered.
+   *
+   * @type {DebugLayoutBlock[] | null}
+   */
+  #debugBlocks = null;
+
+  /**
+   * Anchors already recorded as a "link" debug box. An anchor that wraps
+   * block content is reached both by addLinkIfAnchor() (before subdividing)
+   * and extractLinksFromBlock()'s anchor scan (once its blocks are
+   * accepted), which would otherwise double up its debug box.
+   *
+   * @type {Set<HTMLAnchorElement> | null}
+   */
+  #debugLinkElements = null;
+
+  /**
+   * Kinds #recordDebugBox() should keep, from GetTextOptions._debugLayoutKinds.
+   * Checked during the walk so unwanted kinds are never recorded, rather than
+   * collecting every kind and filtering afterward.
+   *
+   * @type {Set<DebugLayoutBlock["kind"]> | null}
+   */
+  #debugKinds = null;
+
+  /**
    * @type {ExtractionStrategy}
    */
   #strategy = DEFAULT_STRATEGY;
@@ -179,6 +206,13 @@ class ExtractionContext {
     this.#options = options;
     this.#minCanvasSize = resolveMinCanvasSize(options);
     this.#maxCanvasCount = resolveMaxCanvasCount(options);
+    if (options._debugLayout) {
+      this.#debugBlocks = [];
+      this.#debugLinkElements = new Set();
+      this.#debugKinds = new Set(
+        options._debugLayoutKinds ?? ["text", "canvas", "link"]
+      );
+    }
 
     if (options.justViewport) {
       const { visualViewport } = document.defaultView;
@@ -248,6 +282,36 @@ class ExtractionContext {
   }
 
   /**
+   * @returns {DebugLayoutBlock[] | null}
+   */
+  get debugBlocks() {
+    return this.#debugBlocks;
+  }
+
+  /**
+   * Records a live element reference rather than a snapshot rect: the debug
+   * overlay re-measures elements itself every animation frame (see
+   * DebugLayoutOverlay.sys.mjs) so boxes keep tracking scroll/resize/layout
+   * changes, which a rect captured once during extraction couldn't do.
+   *
+   * @param {DebugLayoutBlock["kind"]} kind
+   * @param {Element | null} element
+   * @param {{ text?: string, href?: string }} [extra]
+   */
+  #recordDebugBox(kind, element, extra) {
+    if (!this.#debugBlocks || !this.#debugKinds.has(kind) || !element) {
+      return;
+    }
+    if (kind === "link") {
+      if (this.#debugLinkElements.has(element)) {
+        return;
+      }
+      this.#debugLinkElements.add(element);
+    }
+    this.#debugBlocks.push({ kind, element, ...extra });
+  }
+
+  /**
    * @param {string} href
    */
   maybeAddLink(href) {
@@ -264,6 +328,7 @@ class ExtractionContext {
       const href = anchor.href;
       if (href) {
         this.#links.add(href);
+        this.#recordDebugBox("link", anchor, { href });
       }
     }
   }
@@ -311,6 +376,7 @@ class ExtractionContext {
     }
 
     canvasSet.add(canvas);
+    this.#recordDebugBox("canvas", canvas);
   }
 
   /**
@@ -326,6 +392,7 @@ class ExtractionContext {
       const href = /** @type {HTMLAnchorElement} */ (element).href;
       if (href) {
         this.maybeAddLink(href);
+        this.#recordDebugBox("link", element, { href });
       }
     }
   }
@@ -514,6 +581,11 @@ class ExtractionContext {
     }
 
     if (innerText) {
+      if (this.#debugBlocks) {
+        this.#recordDebugBox("text", element ?? getHTMLElementForStyle(node), {
+          text: innerText,
+        });
+      }
       if (node.documentGlobal) {
         // Use whitespace behavior from the DOM.
         this.#textContent += "\n" + innerText;
@@ -750,6 +822,7 @@ export function extractTextFromDOM(document, rootNode, options) {
     links: context.links,
     canvases: context.canvases,
     siteStrategy: context.strategyName,
+    debugBlocks: context.debugBlocks,
   };
 }
 

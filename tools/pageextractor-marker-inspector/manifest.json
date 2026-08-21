@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "PageExtractor Extract Debugger",
+  "version": "2.0.0",
+  "description": "Local debug tool: trigger PageExtractor's getText() from a DevTools panel with any GetTextOptions and see the verbatim output plus the extracted layout's bounding boxes drawn on the page.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "pageextractor-marker-inspector@mozilla.org",
+      "strict_min_version": "115.0"
+    }
+  },
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "devtools_page": "devtools/devtools-page.html",
+  "icons": {
+    "32": "icons/icon.svg"
+  },
+  "experiment_apis": {
+    "pageExtractorDebug": {
+      "schema": "experiment-apis/pageExtractorDebug.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "script": "experiment-apis/pageExtractorDebug.js",
+        "paths": [["pageExtractorDebug"]]
+      }
+    }
+  }
+}

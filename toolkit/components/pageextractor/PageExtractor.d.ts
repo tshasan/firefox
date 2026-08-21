@@ -26,12 +26,44 @@ export type GetTextOptions = Partial<{
   _forceRemoveBoilerplate: boolean;
   // The URL of the page being extracted. Used to apply custom extraction strategies for specific sites.
   sourceUrl: string;
+  // Debug-only: have ExtractionContext record every text block, canvas, and
+  // link element it extracts, and draw a live-tracking highlight overlay
+  // over them (see DebugLayoutOverlay.sys.mjs). Not surfaced in
+  // markers/telemetry; intended for debug tooling only.
+  _debugLayout: boolean;
+  // Debug-only: restricts _debugLayout's overlay to these block kinds.
+  // Defaults to all three when omitted. Kinds that overlap the same page
+  // area (e.g. a link inside a text block) each still get their own box.
+  _debugLayoutKinds: DebugLayoutBlock["kind"][];
 }>;
 
 export type CanvasSnapshot = {
   blob: Blob;
   width: number;
   height: number;
+};
+
+// Only used content-process-side (DOMExtractor/PageExtractorChild/
+// DebugLayoutOverlay): carries a live element reference so the overlay can
+// re-measure it every frame instead of relying on a rect captured once
+// during extraction, which couldn't track scrolling/resizing/reflow.
+export type DebugLayoutBlock = {
+  kind: "text" | "canvas" | "link";
+  element: Element;
+  // Present for kind "text".
+  text?: string;
+  // Present for kind "link".
+  href?: string;
+};
+
+// DebugLayoutBlock's info without the live element reference, for the
+// overlay's hover/click selection (see DebugLayoutOverlay.sys.mjs's
+// describeBlock() and getHoveredDebugBlock()).
+export type HoveredDebugBlock = {
+  kind: DebugLayoutBlock["kind"];
+  tag: string;
+  text?: string;
+  href?: string;
 };
 
 export type DOMExtractionResult = {
@@ -41,12 +73,18 @@ export type DOMExtractionResult = {
   // The site-specific strategy applied (e.g. "google-search", "youtube", or
   // "default"), for telemetry/marker use.
   siteStrategy: string;
+  // Only populated when GetTextOptions._debugLayout is set.
+  debugBlocks: DebugLayoutBlock[] | null;
 };
 
 export type ExtractionResult = {
   text: string;
   links: string[];
   canvasSnapshots: CanvasSnapshot[];
+  // Which top-level path ran, e.g. "dom", "reader", "about-reader",
+  // "youtube-transcript"/"youtube-dom". Debug-only visibility into
+  // otherwise-internal behavior; not previously part of this type.
+  strategy?: string;
 };
 
 export type ExtractionStrategy = Partial<{

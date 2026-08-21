@@ -6,7 +6,7 @@
 
 /**
  * @import { HiddenFrame } from "resource://gre/modules/HiddenFrame.sys.mjs"
- * @import { GetTextOptions, ExtractionResult, PageMetadata } from './PageExtractor.d.ts'
+ * @import { GetTextOptions, ExtractionResult, PageMetadata, HoveredDebugBlock } from './PageExtractor.d.ts'
  * @import { PageExtractorChild } from './PageExtractorChild.sys.mjs'
  */
 
@@ -66,7 +66,7 @@ export class PageExtractorParent extends JSWindowActorParent {
    * @param {string} [flowId] - Correlates this call with the profiler marker
    *   and telemetry event of an enclosing headless-extractor request. Internal
    *   use only, not a public GetTextOptions field: mints its own when omitted.
-   * @returns {Promise<void>}
+   * @returns {Promise<string>} The wait's outcome: success or document-hidden.
    */
   async waitForPageReady(flowId) {
     const event = this.#startEvent("wait-for-ready", { flowId });
@@ -78,6 +78,7 @@ export class PageExtractorParent extends JSWindowActorParent {
         }
       );
       event.finish({ status });
+      return status;
     } catch (error) {
       event.finish({ status: "error", errorName: error.name });
       throw error;
@@ -107,6 +108,28 @@ export class PageExtractorParent extends JSWindowActorParent {
       event.finish({ status: "error", errorName: error.name });
       throw error;
     }
+  }
+
+  /**
+   * Debug-only: removes the live-tracking highlight overlay a prior
+   * getText({ _debugLayout: true }) call left showing, if any.
+   *
+   * @see PageExtractorChild#clearDebugOverlay
+   * @returns {Promise<void>}
+   */
+  async clearDebugOverlay() {
+    await this.sendQuery("PageExtractorParent:ClearDebugOverlay");
+  }
+
+  /**
+   * Debug-only: the block currently under the mouse in the debug overlay,
+   * for a devtools panel to poll and display in full (untruncated).
+   *
+   * @see PageExtractorChild#getHoveredDebugBlock
+   * @returns {Promise<HoveredDebugBlock | null>}
+   */
+  async getHoveredDebugBlock() {
+    return this.sendQuery("PageExtractorParent:GetHoveredDebugBlock");
   }
 
   /**
@@ -263,9 +286,15 @@ export class PageExtractorParent extends JSWindowActorParent {
         );
       }
     }
+    // `host` (unlike `sourceUrl`, see PageExtractorEvents.sys.mjs's
+    // OPTION_FIELDS doc) is domain-only, no path or query string, and reaches
+    // only the profiler marker via PageExtractorEvent's own schema field,
+    // never Glean: `recordGlean`'s `base` only ever assembles a fixed set of
+    // named fields, so an unlisted key here can't leak into it.
     const event = new lazy.PageExtractorEvent("headless-extractor", {
       process: "parent",
       strategy: anonymousFetch ? "headless-anonymous" : "headless",
+      host: url.host,
     });
     const { flowId } = event;
 
@@ -278,6 +307,7 @@ export class PageExtractorParent extends JSWindowActorParent {
     const navigateEvent = new lazy.PageExtractorEvent("headless-navigate", {
       process: "parent",
       flowId,
+      host: url.host,
     });
 
     // The hidden browser manager controls the lifetime of the hidden browser.

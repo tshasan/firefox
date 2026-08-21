@@ -39,6 +39,12 @@ const lazy = XPCOMUtils.declareLazy({
     "moz-src:///toolkit/components/pageextractor/YouTubeExtraction.sys.mjs",
   PageExtractorEvent:
     "moz-src:///toolkit/components/pageextractor/PageExtractorEvents.sys.mjs",
+  showDebugLayoutOverlay:
+    "moz-src:///toolkit/components/pageextractor/DebugLayoutOverlay.sys.mjs",
+  clearDebugLayoutOverlay:
+    "moz-src:///toolkit/components/pageextractor/DebugLayoutOverlay.sys.mjs",
+  getHoveredDebugBlock:
+    "moz-src:///toolkit/components/pageextractor/DebugLayoutOverlay.sys.mjs",
   isProbablyReaderable: "resource://gre/modules/Readerable.sys.mjs",
   youtubeTimeoutMs: {
     pref: "browser.pageextractor.youtube.timeoutMs",
@@ -70,8 +76,30 @@ export class PageExtractorChild extends JSWindowActorChild {
         return this.waitForPageReady(data?.flowId);
       case "PageExtractorParent:GetPageMetadata":
         return this.#getPageMetadata(data?.flowId);
+      case "PageExtractorParent:ClearDebugOverlay":
+        return this.#clearDebugOverlay();
+      case "PageExtractorParent:GetHoveredDebugBlock":
+        return this.#getHoveredDebugBlock();
     }
     return Promise.reject(new Error("Unknown message: " + name));
+  }
+
+  /**
+   * Debug-only: removes the live-tracking highlight overlay a prior
+   * getText({ _debugLayout: true }) call left showing, if any.
+   */
+  #clearDebugOverlay() {
+    if (this.document) {
+      lazy.clearDebugLayoutOverlay(this.document);
+    }
+  }
+
+  /**
+   * Debug-only: the block currently under the mouse in the debug overlay,
+   * for a devtools panel to poll and display in full (untruncated).
+   */
+  #getHoveredDebugBlock() {
+    return this.document ? lazy.getHoveredDebugBlock(this.document) : null;
   }
 
   /**
@@ -387,7 +415,7 @@ export class PageExtractorChild extends JSWindowActorChild {
       event.flowId,
       strategy
     );
-    const { text, links, canvases } = extraction;
+    const { text, links, canvases, debugBlocks } = extraction;
     // "default" means no site-specific strategy applied; only surface the
     // named ones (e.g. "google-search", "youtube") on the top-level event.
     if (extraction.siteStrategy && extraction.siteStrategy !== "default") {
@@ -402,6 +430,15 @@ export class PageExtractorChild extends JSWindowActorChild {
         options,
         event.flowId
       );
+    }
+
+    if (debugBlocks?.length && this.document) {
+      // Uses the live document rather than the local `document`, which the
+      // reader-mode path above may have reassigned to a detached
+      // DOMParser().parseFromString() result with no defaultView.
+      lazy.showDebugLayoutOverlay(this.document, debugBlocks).catch(error => {
+        lazy.console.debug("Failed to show PageExtractor debug overlay", error);
+      });
     }
 
     // On YouTube a transcript block replaces the generic walk. Without
@@ -428,7 +465,16 @@ export class PageExtractorChild extends JSWindowActorChild {
       canvasCount: canvasSnapshots.length,
     });
     return {
-      result: { text: finalText, links, canvasSnapshots },
+      result: {
+        text: finalText,
+        links,
+        canvasSnapshots,
+        // Mirrors eventData below (used for the caller's own telemetry
+        // bookkeeping) so debug tooling can see which strategy actually
+        // ran without needing its own copy of getStrategyForUrl()'s
+        // sourceUrl-matching logic.
+        strategy,
+      },
       eventData: { strategy, siteStrategy },
     };
   }

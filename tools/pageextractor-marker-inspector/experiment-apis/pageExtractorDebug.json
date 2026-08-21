@@ -1,0 +1,57 @@
+[
+  {
+    "namespace": "pageExtractorDebug",
+    "description": "Debug-only bridge to the real PageExtractor JSWindowActor, for the PageExtractor Marker Inspector devtools panel.",
+    "functions": [
+      {
+        "name": "getText",
+        "type": "function",
+        "description": "Calls the real PageExtractorParent#getText() for the given tab with the given GetTextOptions. Resolves to { result, markers, telemetry }: the real result, the PageExtractor profiler markers the call produced, and any newly recorded PageExtractor Glean events.",
+        "async": true,
+        "parameters": [
+          { "name": "tabId", "type": "integer" },
+          { "name": "options", "type": "object", "additionalProperties": true }
+        ]
+      },
+      {
+        "name": "getPageMetadata",
+        "type": "function",
+        "description": "Calls the real PageExtractorParent#getPageMetadata() for the given tab. Resolves to { result, markers, telemetry }; see getText().",
+        "async": true,
+        "parameters": [{ "name": "tabId", "type": "integer" }]
+      },
+      {
+        "name": "waitForPageReady",
+        "type": "function",
+        "description": "Calls the real PageExtractorParent#waitForPageReady() for the given tab. Resolves to { result, markers, telemetry }, where result is the status string; see getText().",
+        "async": true,
+        "parameters": [{ "name": "tabId", "type": "integer" }]
+      },
+      {
+        "name": "clearDebugOverlay",
+        "type": "function",
+        "description": "Calls the real PageExtractorParent#clearDebugOverlay() for the given tab, removing the live-tracking highlight overlay a prior getText({ _debugLayout: true }) call left showing.",
+        "async": true,
+        "parameters": [{ "name": "tabId", "type": "integer" }]
+      },
+      {
+        "name": "getHoveredDebugBlock",
+        "type": "function",
+        "description": "Calls the real PageExtractorParent#getHoveredDebugBlock() for the given tab: the block currently under the mouse in the debug overlay, or null.",
+        "async": true,
+        "parameters": [{ "name": "tabId", "type": "integer" }]
+      },
+      {
+        "name": "getHeadlessText",
+        "type": "function",
+        "description": "Calls the real PageExtractorParent.getHeadlessExtractor() with the given URL and GetTextOptions, independent of any open tab. Resolves to { result, markers, telemetry }; see getText().",
+        "async": true,
+        "parameters": [
+          { "name": "urlString", "type": "string" },
+          { "name": "options", "type": "object", "additionalProperties": true },
+          { "name": "anonymousFetch", "type": "boolean" }
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,322 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>PageExtractor Extract Debugger</title>
+    <style>
+      /* Perf section: kept minimal (no framework, no build step) but
+         readable — plain nested elements below rely on these classes to
+         make the parent/content split and phase timing scannable at a
+         glance instead of one flat wall of text. */
+      .perf-flow {
+        border: 1px solid #ccced2;
+        border-radius: 4px;
+        padding: 8px 10px;
+        margin-block-end: 10px;
+      }
+      .perf-flow-header {
+        font-weight: bold;
+        margin-block-end: 6px;
+      }
+      .perf-marker-row {
+        display: grid;
+        grid-template-columns: 4.5em 5em 8em 8em 1fr;
+        column-gap: 8px;
+        align-items: center;
+        padding-block: 2px;
+        font-family: monospace;
+        font-size: 12px;
+      }
+      .perf-process {
+        border-radius: 3px;
+        padding: 0 4px;
+        text-align: center;
+        color: #fff;
+      }
+      .perf-process-parent {
+        background: #0060df;
+      }
+      .perf-process-content {
+        background: #12bc00;
+      }
+      .perf-phase {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .perf-swatch {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border-radius: 2px;
+        flex: none;
+      }
+      .perf-bar-track {
+        background: #eee;
+        border-radius: 2px;
+        overflow: hidden;
+        height: 10px;
+        min-width: 3em;
+      }
+      .perf-bar-fill {
+        height: 100%;
+      }
+      .perf-status-error {
+        color: #c50042;
+        font-weight: bold;
+      }
+      .perf-details {
+        color: #444;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      table.perf-table {
+        border-collapse: collapse;
+        font-size: 12px;
+        width: 100%;
+      }
+      table.perf-table th,
+      table.perf-table td {
+        border: 1px solid #ddd;
+        padding: 2px 6px;
+        text-align: start;
+        vertical-align: top;
+      }
+      table.perf-table th {
+        background: #f4f4f4;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>PageExtractor Extract Debugger</h1>
+
+    <form id="options-form">
+      <p>
+        <label
+          >Preset
+          <select id="presets">
+            <option value="">— pick a preset —</option>
+            <option value="default">Default (no options)</option>
+            <option value="readerMode">Reader mode (removeBoilerplate)</option>
+            <option value="viewportOnly">Just viewport</option>
+            <option value="withImages">Include canvas snapshots</option>
+            <option value="shortSummary">Short summary (500 chars)</option>
+            <option value="longArticle">
+              Long article (50000 chars, removeBoilerplate)
+            </option>
+            <option value="everything">
+              Everything (reader + viewport + images)
+            </option>
+            <option value="smartWindowDefault">
+              Smart Window default (get_page_content)
+            </option>
+            <option value="smartWindowSerp">
+              Smart Window SERP (run_search)
+            </option>
+            <option value="smartFormFill">Smart Form Fill (single tab)</option>
+          </select>
+        </label>
+      </p>
+
+      <p>
+        <label
+          >sourceUrl (auto-filled from the inspected page)<br />
+          <input
+            type="text"
+            name="sourceUrl"
+            id="sourceUrl"
+            size="70"
+            placeholder="https://…"
+        /></label>
+      </p>
+
+      <p>
+        <label
+          ><input type="checkbox" name="justViewport" /> justViewport</label
+        >
+      </p>
+      <p>
+        <label
+          ><input type="checkbox" name="removeBoilerplate" />
+          removeBoilerplate</label
+        >
+      </p>
+      <p>
+        <label
+          ><input
+            type="checkbox"
+            name="_debugLayout"
+            id="debugLayout"
+            checked
+          />
+          Show debug boxes on page (not available when removeBoilerplate
+          actually applies reader mode — see note after extracting)</label
+        >
+      </p>
+      <p id="boxes-warning" hidden>
+        <strong
+          >Debug boxes are on the page. Every box intercepts clicks over it, so
+          normal page interaction (links, buttons, forms) won't work underneath
+          a box until you clear them.</strong
+        >
+      </p>
+      <p>
+        Box kinds to show (a box is drawn for every kind checked, even where
+        they overlap the same page area):<br />
+        <label
+          ><input type="checkbox" id="debugLayoutKindText" checked />
+          text</label
+        >
+        <label
+          ><input type="checkbox" id="debugLayoutKindLink" checked />
+          link</label
+        >
+        <label
+          ><input type="checkbox" id="debugLayoutKindCanvas" checked />
+          canvas</label
+        >
+      </p>
+      <p>
+        <label
+          >sufficientLength
+          <input
+            type="number"
+            name="sufficientLength"
+            min="0"
+            placeholder="unbounded"
+        /></label>
+      </p>
+
+      <fieldset id="canvas-fieldset" disabled>
+        <legend>
+          <label
+            ><input
+              type="checkbox"
+              name="includeCanvasSnapshots"
+              id="includeCanvasSnapshots"
+            />
+            includeCanvasSnapshots</label
+          >
+        </legend>
+        <p>
+          <label
+            >minCanvasSize
+            <input type="number" name="minCanvasSize" min="0" placeholder="50"
+          /></label>
+        </p>
+        <p>
+          <label
+            >maxCanvasCount
+            <input type="number" name="maxCanvasCount" min="0" placeholder="10"
+          /></label>
+        </p>
+        <p>
+          <label
+            >maxCanvasDimension
+            <input
+              type="number"
+              name="maxCanvasDimension"
+              min="0"
+              placeholder="1024"
+          /></label>
+        </p>
+        <p>
+          <label
+            >canvasQuality
+            <input
+              type="number"
+              name="canvasQuality"
+              min="0"
+              max="1"
+              step="0.05"
+              placeholder="0.8"
+          /></label>
+        </p>
+      </fieldset>
+
+      <details>
+        <summary>Advanced / test-only options</summary>
+        <p>
+          <label
+            ><input type="checkbox" name="_forceRemoveBoilerplate" />
+            _forceRemoveBoilerplate (automation-only — errors otherwise
+            here)</label
+          >
+        </p>
+      </details>
+
+      <p>
+        <button type="submit">Extract</button>
+        <button type="button" id="clear-boxes">Clear boxes on page</button>
+      </p>
+    </form>
+
+    <hr />
+
+    <fieldset>
+      <legend>Other actions</legend>
+      <p>
+        <button type="button" id="get-page-metadata">Get page metadata</button>
+        <button type="button" id="wait-for-page-ready">
+          Wait for page ready
+        </button>
+      </p>
+      <dl id="other-actions-output"></dl>
+      <div id="other-actions-perf"></div>
+    </fieldset>
+
+    <hr />
+
+    <fieldset>
+      <legend>Selected block</legend>
+      <dl id="hover-info">
+        <dt>Nothing selected</dt>
+        <dd>Click a box on the page to see what it is, in full here.</dd>
+      </dl>
+    </fieldset>
+
+    <hr />
+
+    <fieldset>
+      <legend>Headless load</legend>
+      <p>
+        Loads a URL in a hidden background browser — the same code path
+        run_search's anonymous SERP fetches use — independent of the inspected
+        tab. Reuses the options above (removeBoilerplate, sufficientLength,
+        canvas options, etc); the debug-boxes option is ignored since there's no
+        visible browser to draw on.
+      </p>
+      <p>
+        <label
+          >URL to load headlessly
+          <input type="text" id="headlessUrl" size="70" placeholder="https://…"
+        /></label>
+      </p>
+      <p>
+        <label
+          ><input type="checkbox" id="headlessAnonymousFetch" /> anonymousFetch
+          (strips cookies/referrer, blocks history/downloads, same as
+          run_search's anonymous mode)</label
+        >
+      </p>
+      <p>
+        <button type="button" id="headless-extract">Extract headlessly</button>
+      </p>
+      <div id="headless-output"></div>
+      <div id="headless-output-perf"></div>
+    </fieldset>
+
+    <hr />
+
+    <div id="extract-output">
+      <p>
+        Pick some options and click Extract to see verbatim output here, and
+        live-tracking layout boxes drawn on the page.
+      </p>
+    </div>
+    <div id="extract-output-perf"></div>
+
+    <script src="extract.js"></script>
+  </body>
+</html>

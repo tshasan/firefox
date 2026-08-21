@@ -39,6 +39,7 @@ function ensureSchemaRegistered() {
         format: "string",
         searchable: true,
       },
+      { key: "host", label: "Host", format: "string", searchable: true },
       { key: "strategy", label: "Strategy", format: "string" },
       { key: "siteStrategy", label: "Site strategy", format: "string" },
       { key: "status", label: "Status", format: "string" },
@@ -330,6 +331,9 @@ export class PageExtractorEvent {
     if (data.strategy) {
       this.#data.strategy = data.strategy;
     }
+    if (data.host) {
+      this.#data.host = data.host;
+    }
   }
 
   get flowId() {
@@ -354,8 +358,14 @@ export class PageExtractorEvent {
     this.#finished = true;
     this.addData(data);
     if (this.#hasMarker) {
+      // The marker chart groups markers into rows by this literal name (not
+      // by the registered schema, which is matched separately via
+      // this.#data.type below), stacking same-name overlapping markers into
+      // shared sub-rows. Suffixing a per-flow tag gives every flow its own
+      // row instead of several concurrent flows (e.g. a batch of headless
+      // extractions) getting packed together indistinguishably.
       ChromeUtils.addProfilerMarker(
-        "PageExtractor",
+        `PageExtractor ${this.#data.flowId.slice(0, 8)}`,
         {
           category: "JavaScript",
           innerWindowId: this.#innerWindowId,

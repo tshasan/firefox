@@ -10,6 +10,7 @@ FINAL_TARGET_FILES.actors += [
 ]
 
 MOZ_SRC_FILES += [
+    "DebugLayoutOverlay.sys.mjs",
     "DOMExtractor.sys.mjs",
     "PageExtractorEvents.sys.mjs",
     "YouTubeExtraction.sys.mjs",
