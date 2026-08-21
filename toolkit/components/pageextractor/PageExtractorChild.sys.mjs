@@ -47,6 +47,13 @@ const lazy = XPCOMUtils.declareLazy({
  */
 export class PageExtractorChild extends JSWindowActorChild {
   /**
+   * True once this actor has waited for its document to become page-ready.
+   *
+   * @type {boolean}
+   */
+  #isPageReady = false;
+
+  /**
    * Route the messages coming from the parent process.
    *
    * @param {object} message
@@ -59,11 +66,14 @@ export class PageExtractorChild extends JSWindowActorChild {
     switch (name) {
       case "PageExtractorParent:GetText": {
         const { options, flowId } = data;
-        await this.waitForPageReady(flowId);
+        if (!this.#isPageReady) {
+          await this.waitForPageReady(flowId);
+        }
         return this.getText(options, flowId);
       }
       case "PageExtractorParent:WaitForPageReady":
-        return this.waitForPageReady(data?.flowId);
+        await this.waitForPageReady(data?.flowId);
+        return undefined;
       case "PageExtractorParent:GetPageMetadata":
         return this.#getPageMetadata(data?.flowId);
     }
@@ -97,11 +107,16 @@ export class PageExtractorChild extends JSWindowActorChild {
         });
       });
 
+      // #isPageReady is set only when the double rAF below runs. A hidden
+      // document skips it: rAF never fires while hidden. A caller that
+      // later needs the layout/paint guarantee -- e.g. once the tab is
+      // foregrounded -- must still wait for it.
       const wasHidden = doc.hidden;
       if (!wasHidden) {
         await new Promise(resolve => {
           win.requestAnimationFrame(() => win.requestAnimationFrame(resolve));
         });
+        this.#isPageReady = true;
       }
 
       event.finish({ status: wasHidden ? "document-hidden" : "success" });

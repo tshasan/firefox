@@ -301,3 +301,61 @@ add_task(async function test_page_extractor_get_text_reports_inner_failure() {
     "The outer get-text phase carries the actual error's name."
   );
 });
+
+/**
+ * waitForPageReady() memoizes readiness only after the double rAF for
+ * layout/paint runs -- not after any wait. A backgrounded tab's wait
+ * returns early as "document-hidden" without running that rAF, so a
+ * later getText() call on the same still-hidden tab must still wait: it
+ * never got the layout/paint guarantee.
+ */
+add_task(async function test_page_extractor_repeats_wait_while_still_hidden() {
+  const { html } = MLTestUtils.serveHTML();
+  const { url, cleanup: cleanupServer } = html`
+    <!DOCTYPE html>
+    <body>
+      Backgrounded content
+    </body>
+  `;
+
+  const backgroundTab = await BrowserTestUtils.addTab(gBrowser, url, {
+    inBackground: true,
+  });
+  await BrowserTestUtils.browserLoaded(backgroundTab.linkedBrowser);
+  const extractor =
+    backgroundTab.linkedBrowser.browsingContext.currentWindowGlobal.getActor(
+      "PageExtractor"
+    );
+
+  await ProfilerTestUtils.startProfilerForMarkerTests();
+  let profile;
+  try {
+    await extractor.waitForPageReady();
+    await extractor.getText();
+    profile = await ProfilerTestUtils.stopNowAndGetProfile();
+  } finally {
+    if (Services.profiler.IsActive()) {
+      await Services.profiler.StopProfiler();
+    }
+    BrowserTestUtils.removeTab(backgroundTab);
+    await cleanupServer();
+  }
+
+  const waitMarkers = ProfilerTestUtils.getPayloadsOfTypeFromAllThreads(
+    profile,
+    "PageExtractor"
+  ).filter(
+    marker => marker.phase === "wait-for-ready" && marker.process === "content"
+  );
+  is(
+    waitMarkers.length,
+    2,
+    "getText() still waits for readiness: the earlier wait never got " +
+      "its rAF guarantee because the tab was hidden, so it wasn't " +
+      "memoized as complete."
+  );
+  ok(
+    waitMarkers.every(marker => marker.status === "document-hidden"),
+    "Both waits reflect that the tab is still hidden."
+  );
+});
