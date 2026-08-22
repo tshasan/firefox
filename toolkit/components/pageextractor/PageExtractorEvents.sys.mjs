@@ -110,14 +110,18 @@ let gNextInstance = 1;
  * @param {string} token - A bare flowId for a new flow or one handed in
  *   from outside this scheme, or an `<instance>:<uuid>` token forwarded
  *   from where the flow began.
- * @returns {{ instance: number, flowId: string }}
+ * @returns {{ instance: number, flowId: string, correlationId: string }}
  */
-function parseFlowToken(token) {
+export function parseFlowToken(token) {
   const separatorIndex = token.indexOf(":");
   if (separatorIndex === -1) {
-    return { instance: gNextInstance++, flowId: token };
+    return { instance: gNextInstance++, flowId: token, correlationId: token };
   }
-  return { instance: Number(token.slice(0, separatorIndex)), flowId: token };
+  return {
+    instance: Number(token.slice(0, separatorIndex)),
+    flowId: token,
+    correlationId: token.slice(separatorIndex + 1),
+  };
 }
 
 const DEFAULT_MARKER_COLOR = "blue";
@@ -127,10 +131,10 @@ const HANDLED_OUTCOME_MARKER_COLOR = "yellow";
 const ERROR_MARKER_COLOR = "red";
 
 /**
- * Accumulates data for one PageExtractor instrumentation event, and on
- * `finish()` fans it out to a profiler marker (only while profiling),
- * keyed by a `flowId` so related markers across the parent and content
- * processes describe the same request.
+ * Accumulates data for one PageExtractor instrumentation event. `finish()`
+ * always records a `page_extractor.phase` Glean event, and a profiler
+ * marker only while profiling; both are keyed by `flowId` so parent- and
+ * content-process records describe the same request.
  */
 export class PageExtractorEvent {
   #data;
@@ -138,6 +142,7 @@ export class PageExtractorEvent {
   #startTime;
   #options;
   #instance;
+  #correlationId;
   #finished = false;
 
   /**
@@ -149,8 +154,9 @@ export class PageExtractorEvent {
     this.#innerWindowId = data.innerWindowId;
     this.#options = data.options;
     const token = data.flowId ?? `${gNextInstance++}:${crypto.randomUUID()}`;
-    const { instance, flowId } = parseFlowToken(token);
+    const { instance, flowId, correlationId } = parseFlowToken(token);
     this.#instance = instance;
+    this.#correlationId = correlationId;
     this.#data = {
       type: "PageExtractor",
       process: data.process,
@@ -183,6 +189,25 @@ export class PageExtractorEvent {
     }
     this.#finished = true;
     this.addData(data);
+
+    // Recorded before the profiler-active check: Glean is the permanent
+    // record, the profiler marker isn't.
+    Glean.pageExtractor.phase.record({
+      // flowId's `<instance>:` prefix is a profiler display detail; not
+      // carried into permanent telemetry.
+      flow_id: this.#correlationId,
+      process: this.#data.process,
+      phase: this.#data.phase,
+      strategy: this.#data.strategy,
+      site_strategy: this.#data.siteStrategy,
+      status: this.#data.status,
+      error_name: this.#data.errorName,
+      text_length: this.#data.textLength,
+      link_count: this.#data.linkCount,
+      canvas_count: this.#data.canvasCount,
+      duration_ms: Math.round(ChromeUtils.now() - this.#startTime),
+    });
+
     if (!Services.profiler.IsActive()) {
       return;
     }
