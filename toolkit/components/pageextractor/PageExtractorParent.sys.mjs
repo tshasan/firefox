@@ -356,6 +356,12 @@ export class PageExtractorParent extends JSWindowActorParent {
 
           const { host } = url;
 
+          // Set when a location change lands on a different site than
+          // requested (e.g. a bot-detection challenge redirect) and never
+          // comes back; read on timeout to tell that case apart from a page
+          // that simply never responded.
+          let challengeHost = null;
+
           /** @type {PromiseWithResolvers<PageExtractorParent>} */
           let actorResolver = Promise.withResolvers();
 
@@ -386,8 +392,10 @@ export class PageExtractorParent extends JSWindowActorParent {
                 );
                 // This is probably overkill, but make sure this is not a spurious
                 // redirect.
+                challengeHost = location.host;
                 return;
               }
+              challengeHost = null;
               browser.removeProgressListener(
                 onLocationChange,
                 locationChangeFlags
@@ -455,6 +463,19 @@ export class PageExtractorParent extends JSWindowActorParent {
           // stall, or bot detection can redirect to a challenge page elsewhere.
           const timeoutMs = lazy.headlessTimeoutMs;
           const timeoutId = lazy.setTimeout(() => {
+            if (challengeHost) {
+              navigateEvent.finish({
+                status: "error",
+                errorName: "BlockedError",
+              });
+              actorResolver.reject(
+                new DOMException(
+                  `The page redirected to ${challengeHost} instead of loading ${url.host}, which looks like a bot-detection challenge, and never returned within ${timeoutMs}ms.`,
+                  "BlockedError"
+                )
+              );
+              return;
+            }
             navigateEvent.finish({
               status: "error",
               errorName: "TimeoutError",

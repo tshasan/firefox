@@ -391,6 +391,66 @@ add_task(async function test_page_extractor_headless_load_navigate_failure() {
 });
 
 /**
+ * A headless load redirected to another host, the way bot detection sends a
+ * request off to a challenge page, records its navigate and extractor
+ * page_extractor.phase events with a distinct "BlockedError" error name, so
+ * it can be told apart from a page that simply never responded.
+ */
+add_task(async function test_page_extractor_headless_load_blocked() {
+  Services.fog.testResetFOG();
+  const { PageExtractorParent } = ChromeUtils.importESModule(
+    "resource://gre/actors/PageExtractorParent.sys.mjs"
+  );
+
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.ml.pageExtractor.headlessTimeoutMs", 500]],
+  });
+
+  const { url, cleanup } = MLTestUtils.serveRedirect({
+    to: "https://example.com/",
+  });
+  try {
+    let caught;
+    try {
+      await PageExtractorParent.getHeadlessExtractor({
+        urlString: url,
+        callback: () =>
+          ok(
+            false,
+            "The callback must not run for a page redirected off-site."
+          ),
+      });
+    } catch (error) {
+      caught = error;
+    }
+    ok(caught, "The extractor gives up on the redirected page.");
+  } finally {
+    await cleanup();
+    await SpecialPowers.popPrefEnv();
+  }
+
+  const navigateEvent = findPhaseEvent("headless-navigate", "parent");
+  is(navigateEvent.extra.status, "error", "The event reports failure.");
+  is(
+    navigateEvent.extra.error_name,
+    "BlockedError",
+    "The block is recorded distinctly from a plain timeout."
+  );
+
+  const headlessEvent = findPhaseEvent(
+    "headless-extractor",
+    "parent",
+    navigateEvent.extra.flow_id
+  );
+  is(headlessEvent.extra.status, "error", "The event reports failure.");
+  is(
+    headlessEvent.extra.error_name,
+    "BlockedError",
+    "The block's error name was recorded on the outer phase too."
+  );
+});
+
+/**
  * getText() has no try/catch of its own: its outer PageExtractorEvent.run()
  * wrapper marks the get-text event as an error if any inner phase
  * (youtube-extract, reader-parse, reader-output-parse, dom-extract) throws.

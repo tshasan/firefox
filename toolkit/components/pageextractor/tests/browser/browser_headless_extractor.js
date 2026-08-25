@@ -75,8 +75,8 @@ add_task(async function test_headless_extraction_404() {
 });
 
 /**
- * Pages that never load, a stalled server and a redirect to another host, must
- * not leave the extractor waiting forever.
+ * A page that accepts the request and never responds must not leave the
+ * extractor waiting forever.
  */
 add_task(async function test_headless_extraction_never_loads() {
   const { PageExtractorParent } = ChromeUtils.importESModule(
@@ -87,10 +87,8 @@ add_task(async function test_headless_extraction_never_loads() {
     set: [["browser.ml.pageExtractor.headlessTimeoutMs", 500]],
   });
 
-  for (const { url, cleanup } of [
-    MLTestUtils.serveStalledPage(),
-    MLTestUtils.serveRedirect({ to: "https://example.com/" }),
-  ]) {
+  const { url, cleanup } = MLTestUtils.serveStalledPage();
+  try {
     await Assert.rejects(
       PageExtractorParent.getHeadlessExtractor({
         urlString: url,
@@ -98,12 +96,55 @@ add_task(async function test_headless_extraction_never_loads() {
           ok(false, "The callback must not run for a page that never loaded."),
       }),
       /did not load in a headless browser within 500ms/,
-      `The extractor gives up on ${url}`
+      "The extractor gives up on a stalled page."
     );
+  } finally {
     await cleanup();
+    await SpecialPowers.popPrefEnv();
   }
+});
 
-  await SpecialPowers.popPrefEnv();
+/**
+ * A redirect to another host, the way bot detection sends a request off to a
+ * challenge page, must be reported distinctly from a page that simply never
+ * responded, so callers can act on it instead of just retrying.
+ */
+add_task(async function test_headless_extraction_redirected_to_challenge() {
+  const { PageExtractorParent } = ChromeUtils.importESModule(
+    "resource://gre/actors/PageExtractorParent.sys.mjs"
+  );
+
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.ml.pageExtractor.headlessTimeoutMs", 500]],
+  });
+
+  const { url, cleanup } = MLTestUtils.serveRedirect({
+    to: "https://example.com/",
+  });
+  try {
+    let caught;
+    try {
+      await PageExtractorParent.getHeadlessExtractor({
+        urlString: url,
+        callback: () =>
+          ok(
+            false,
+            "The callback must not run for a page redirected off-site."
+          ),
+      });
+    } catch (error) {
+      caught = error;
+    }
+    ok(caught, "The extractor gives up on a page redirected to another host.");
+    is(caught.name, "BlockedError", "The error is distinguishable as a block.");
+    ok(
+      /looks like a bot-detection challenge/.test(caught.message),
+      "The error explains why the load was abandoned."
+    );
+  } finally {
+    await cleanup();
+    await SpecialPowers.popPrefEnv();
+  }
 });
 
 /**

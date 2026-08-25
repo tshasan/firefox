@@ -990,6 +990,10 @@ export class GetPageContent {
               content: `The page at ${url_list[index]} did not finish loading in time, so its content is unavailable. Do not retry it.`,
             };
           }
+          if (error?.name === "BlockedError") {
+            lazy.console.log("[Tool] getPageContent was blocked", error);
+            return `The page at ${url_list[index]} appears to block automated access (e.g. a bot-detection challenge), so its content is unavailable. Do not retry it.`;
+          }
           console.error(error);
           return {
             url,

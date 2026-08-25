@@ -683,6 +683,37 @@ add_task(async function test_getPageContent_ledger_url_uses_stripped_fetch() {
   }
 });
 
+add_task(async function test_getPageContent_reports_blocked_headless_read() {
+  // getHeadlessExtractor rejects with a "BlockedError" DOMException when a
+  // headless load is redirected off-site the way bot detection sends a
+  // request to a challenge page (Bug 2058754). The model needs a message it
+  // can act on (and not retry), not the generic failure string.
+  const sb = sinon.createSandbox();
+
+  try {
+    const targetUrl = "https://example.com/challenge";
+    sb.stub(PageExtractorParent, "getHeadlessExtractor").rejects(
+      new DOMException(
+        "The page redirected to challenge.example instead of loading example.com, which looks like a bot-detection challenge, and never returned within 500ms.",
+        "BlockedError"
+      )
+    );
+
+    const result_array = await GetPageContent.getPageContent(
+      { url_list: [targetUrl] },
+      makeConversation()
+    );
+
+    Assert.equal(
+      result_array[0],
+      `The page at ${targetUrl} appears to block automated access (e.g. a bot-detection challenge), so its content is unavailable. Do not retry it.`,
+      "The model gets a message it can act on, not a generic failure string"
+    );
+  } finally {
+    sb.restore();
+  }
+});
+
 add_task(async function test_getPageContent_aborts_hung_extraction() {
   // A page read whose extraction never settles must not hang the caller: once
   // the passed AbortSignal fires (e.g. a page-read timeout), getPageContent
