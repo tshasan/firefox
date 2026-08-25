@@ -55,6 +55,33 @@ const SANDBOXED_STORAGE_ACCESS = 0x8000;
 const SANDBOXED_DOWNLOADS = 0x10000;
 
 /**
+ * Whether a redirect from `hostA` to `hostB` should be treated as staying on
+ * the requested site. Exact-host matching would reject the common apex-to-
+ * `www` (or vice versa) redirect that many sites issue on load, so this
+ * falls back to comparing registrable domains.
+ *
+ * @param {string} hostA
+ * @param {string} hostB
+ * @returns {boolean}
+ */
+function isSameSite(hostA, hostB) {
+  if (hostA == hostB) {
+    return true;
+  }
+  try {
+    return (
+      Services.eTLD.getBaseDomainFromHost(hostA) ==
+      Services.eTLD.getBaseDomainFromHost(hostB)
+    );
+  } catch {
+    // IP addresses, "localhost", and other hosts without a registrable
+    // domain aren't comparable this way; they already failed the exact
+    // match above, so treat them as different sites.
+    return false;
+  }
+}
+
+/**
  * Extract a variety of content from pages for use in a smart window.
  */
 export class PageExtractorParent extends JSWindowActorParent {
@@ -319,9 +346,9 @@ export class PageExtractorParent extends JSWindowActorParent {
                 );
                 return;
               }
-              if (URL.fromURI(location).host != host) {
+              if (!isSameSite(URL.fromURI(location).host, host)) {
                 lazy.console.log(
-                  "A location change happened that wasn't the host.",
+                  "A location change happened that wasn't the same site.",
                   location.host,
                   host
                 );
