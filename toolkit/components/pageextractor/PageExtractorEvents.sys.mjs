@@ -94,6 +94,7 @@ const PHASES = {
   "dom-extract": { label: "Scan page content" },
   "canvas-capture": { label: "Capture page images" },
   "youtube-extract": { label: "Read video transcript" },
+  "access-denied": { label: "Blocked: untrusted content in conversation" },
 };
 
 // Each marker is named with a small integer (e.g. "PageExtractor #3") so

@@ -18,7 +18,10 @@ import {
   manageTabsAction,
   TAB_ACTIONS,
 } from "moz-src:///browser/components/aiwindow/models/ManageTabs.sys.mjs";
-import { PageExtractorParent } from "resource://gre/actors/PageExtractorParent.sys.mjs";
+import {
+  PageExtractorParent,
+  normalizeExtractionUrl,
+} from "resource://gre/actors/PageExtractorParent.sys.mjs";
 import {
   ChatStore,
   MESSAGE_ROLE,
@@ -38,6 +41,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
   setTimeout: "resource://gre/modules/Timer.sys.mjs",
   MemoriesManager:
     "moz-src:///browser/components/aiwindow/models/memories/MemoriesManager.sys.mjs",
+  PageExtractorEvent:
+    "moz-src:///toolkit/components/pageextractor/PageExtractorEvents.sys.mjs",
   SessionStore:
     "moz-src:///browser/components/sessionstore/SessionStore.sys.mjs",
   SmartWindowNavigationInfo:
@@ -76,11 +81,8 @@ const ALLOWED_URL_PROTOCOLS = new Set(["http:", "https:"]);
  * @returns {boolean}
  */
 function isAllowedURL(url) {
-  try {
-    return ALLOWED_URL_PROTOCOLS.has(new URL(url).protocol);
-  } catch {
-    return false;
-  }
+  const parsed = normalizeExtractionUrl(url);
+  return !!parsed && ALLOWED_URL_PROTOCOLS.has(parsed.protocol);
 }
 
 // Important! Changing or removing this value requires a security review.
@@ -945,14 +947,23 @@ export class GetPageContent {
 
     const results = await Promise.all(
       url_list.map(async (url, index) => {
-        if (!isAllowedURL(url)) {
+        // Canonicalize before comparing against mentionedUrls/serpUrlsForAnonymousFetch
+        // below, so formatting differences between what the model echoes back
+        // (e.g. a missing scheme or trailing slash) don't make an
+        // otherwise-identical URL fail those set-membership checks.
+        const normalizedUrl = normalizeExtractionUrl(url);
+        if (
+          !normalizedUrl ||
+          !ALLOWED_URL_PROTOCOLS.has(normalizedUrl.protocol)
+        ) {
           return { url, ok: false, content: "This URL is not allowed: " + url };
         }
+        const canonicalUrl = normalizedUrl.href;
         const startTime = ChromeUtils.now();
         try {
           const { ok, content } =
             await GetPageContent.#getPageContentsForSingleURL(
-              url,
+              canonicalUrl,
               mentionedUrls,
               conversation,
               signal
@@ -960,7 +971,7 @@ export class GetPageContent {
           ChromeUtils.addProfilerMarker(
             "SmartWindow",
             { startTime },
-            `Tool:get_page_content(${url})`
+            `Tool:get_page_content(${canonicalUrl})`
           );
           return { url, ok, content };
         } catch (error) {
@@ -1090,6 +1101,12 @@ export class GetPageContent {
           anonymousFetch: true,
         });
       }
+      // Record this as a blocked attempt, not just a string reply, so it's
+      // visible in page_extractor.phase alongside actual extraction outcomes.
+      // The URL itself isn't recorded, to keep the event privacy-preserving.
+      new lazy.PageExtractorEvent("access-denied", {
+        process: "parent",
+      }).finish({ status: "blocked", errorName: "UntrustedContent" });
       return {
         ok: false,
         content:

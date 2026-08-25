@@ -117,7 +117,9 @@ add_task(async function test_getPageContent_multiple_urls() {
 
   try {
     const url1 = "https://example.com/page";
-    const url2 = "https://other.com";
+    // A real nsIURI.spec for an origin-only URL always has a trailing slash;
+    // match that here since url_list entries are canonicalized the same way.
+    const url2 = "https://other.com/";
     const tabs = [
       createFakeTab(url1, "Page One"),
       createFakeTab(url2, "Page Two"),
@@ -448,6 +450,127 @@ add_task(async function test_getPageContent_invalid_url_format() {
     sb.restore();
   }
 });
+
+add_task(async function test_getPageContent_bare_domain_is_normalized() {
+  // A model can echo back a bare domain (no scheme) the way someone might
+  // type it in the URL bar; that must not be rejected outright the way
+  // genuine junk input like "not-a-valid-url" is.
+  const sb = sinon.createSandbox();
+
+  try {
+    const headlessStub = sb
+      .stub(PageExtractorParent, "getHeadlessExtractor")
+      .callsFake(({ callback }) =>
+        callback({
+          getText: sinon.stub().resolves({ text: "ok", links: [] }),
+        })
+      );
+
+    const result_array = await GetPageContent.getPageContent(
+      { url_list: ["external.com/article"] },
+      makeConversation()
+    );
+
+    Assert.ok(
+      !result_array[0].includes("This URL is not allowed"),
+      "A bare domain should be resolved, not rejected as disallowed"
+    );
+    Assert.ok(headlessStub.calledOnce, "Extraction should be attempted");
+    Assert.equal(
+      headlessStub.firstCall.args[0].urlString,
+      "https://external.com/article",
+      "The bare domain should default to https, like the URL bar does"
+    );
+  } finally {
+    sb.restore();
+  }
+});
+
+add_task(
+  async function test_getPageContent_mention_match_tolerates_formatting() {
+    // The model might echo back a mentioned URL slightly differently (e.g.
+    // missing its scheme) than how it's stored in the mention ledger; the
+    // comparison should still recognize it as the same URL rather than
+    // spuriously blocking it.
+    const sb = sinon.createSandbox();
+
+    try {
+      const headlessStub = sb
+        .stub(PageExtractorParent, "getHeadlessExtractor")
+        .callsFake(({ callback }) =>
+          callback({
+            getText: sinon.stub().resolves({ text: "ok", links: [] }),
+          })
+        );
+
+      const conversation = makeConversation({
+        privateData: true,
+        untrustedInput: true,
+      });
+      conversation.getAllMentionURLs = () =>
+        new Set(["https://mentioned.example.com/"]);
+
+      const result_array = await GetPageContent.getPageContent(
+        { url_list: ["mentioned.example.com"] },
+        conversation
+      );
+
+      Assert.ok(
+        !result_array[0].includes("Access is not allowed"),
+        "A mentioned URL should be recognized despite the missing scheme"
+      );
+      Assert.ok(headlessStub.calledOnce, "Extraction should be attempted");
+      Assert.equal(
+        headlessStub.firstCall.args[0].urlString,
+        "https://mentioned.example.com/",
+        "The canonicalized form should be recognized as the mentioned URL"
+      );
+    } finally {
+      sb.restore();
+    }
+  }
+);
+
+add_task(
+  async function test_getPageContent_blocked_records_page_extractor_phase() {
+    // The untrusted+private block used to be invisible to
+    // page_extractor.phase telemetry; it should now show up alongside real
+    // extraction attempts so blocked requests aren't silently unaccounted
+    // for.
+    Services.fog.testResetFOG();
+
+    const conversation = makeConversation({
+      privateData: true,
+      untrustedInput: true,
+    });
+    const result = await GetPageContent.getPageContent(
+      { url_list: ["https://blocked.example.com/"] },
+      conversation
+    );
+    Assert.ok(
+      result[0].includes("Access is not allowed"),
+      "Sanity check: this request is blocked"
+    );
+
+    const event = Glean.pageExtractor.phase
+      .testGetValue()
+      ?.find(e => e.extra.phase === "access-denied");
+    Assert.ok(
+      event,
+      "A page_extractor.phase event should record the blocked attempt"
+    );
+    Assert.equal(
+      event.extra.status,
+      "blocked",
+      "The event reports the block, not an error."
+    );
+    Assert.equal(
+      event.extra.error_name,
+      "UntrustedContent",
+      "The block reason is recorded."
+    );
+  }
+);
 
 add_task(async function test_getPageContent_refuses_both_security_flags() {
   const conversation = makeConversation({

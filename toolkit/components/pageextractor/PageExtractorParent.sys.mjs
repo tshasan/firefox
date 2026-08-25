@@ -55,6 +55,30 @@ const SANDBOXED_STORAGE_ACCESS = 0x8000;
 const SANDBOXED_DOWNLOADS = 0x10000;
 
 /**
+ * Resolves user- or model-supplied URL text to its canonical absolute form.
+ * A bare domain (e.g. "ign.com", the way someone might type it in the URL
+ * bar) has no scheme and fails `URL.parse` outright; default those to
+ * https, the same guess the URL bar makes. Only does so when the text
+ * contains a dot, so free-text strings that merely aren't URLs (no scheme,
+ * no TLD) are still rejected rather than misread as a single-label
+ * hostname.
+ *
+ * @param {string} urlString
+ * @returns {URL | null}
+ */
+export function normalizeExtractionUrl(urlString) {
+  let url = URL.parse(urlString);
+  if (
+    !url &&
+    !/^[a-z][a-z0-9+.-]*:/i.test(urlString) &&
+    urlString.includes(".")
+  ) {
+    url = URL.parse(`https://${urlString}`);
+  }
+  return url;
+}
+
+/**
  * Whether a redirect from `hostA` to `hostB` should be treated as staying on
  * the requested site. Exact-host matching would reject the common apex-to-
  * `www` (or vice versa) redirect that many sites issue on load, so this
@@ -246,44 +270,52 @@ export class PageExtractorParent extends JSWindowActorParent {
    * @returns {Promise<T>}
    */
   static async getHeadlessExtractor({ urlString, callback, anonymousFetch }) {
-    const url = URL.parse(urlString);
-    if (!url) {
-      throw new Error("A valid URL must be provided.");
-    }
-    if (!["http:", "https:"].includes(url.protocol)) {
-      throw new Error("Only http: and https: URLs are supported.");
-    }
-    if (anonymousFetch && url.protocol === "http:") {
-      // Only loopback (e.g. localhost) and local network URLs are allowed to use
-      // http since they do not perform external network requests.
-      const principal = Services.scriptSecurityManager.createContentPrincipal(
-        url.URI,
-        {}
-      );
-      if (!principal.isLoopbackHost && !principal.isLocalIpAddress) {
-        throw new Error(
-          "Only https: URLs are supported for anonymous fetches."
-        );
-      }
-    }
     const event = new lazy.PageExtractorEvent("headless-extractor", {
       process: "parent",
       strategy: anonymousFetch ? "headless-anonymous" : "headless",
     });
     const { flowId } = event;
 
-    // Covers navigating the hidden browser up to onLocationChange, before
-    // the page-ready wait starts. Whichever of three outcomes (navigation
-    // commits, the actor lookup throws, or the load times out) happens
-    // first finishes it; finish()'s idempotency handles the rest.
-    const navigateEvent = new lazy.PageExtractorEvent("headless-navigate", {
-      process: "parent",
-      flowId,
-    });
+    // Validation failures below are recorded through this run() too (as
+    // "error" with the DOMException's name), so a request blocked before it
+    // ever reaches the network is still visible in page_extractor.phase.
+    return event.run(async () => {
+      const url = normalizeExtractionUrl(urlString);
+      if (!url) {
+        throw new Error("A valid URL must be provided.");
+      }
+      if (!["http:", "https:"].includes(url.protocol)) {
+        throw new DOMException(
+          "Only http: and https: URLs are supported.",
+          "SecurityError"
+        );
+      }
+      if (anonymousFetch && url.protocol === "http:") {
+        // Only loopback (e.g. localhost) and local network URLs are allowed to use
+        // http since they do not perform external network requests.
+        const principal = Services.scriptSecurityManager.createContentPrincipal(
+          url.URI,
+          {}
+        );
+        if (!principal.isLoopbackHost && !principal.isLocalIpAddress) {
+          throw new DOMException(
+            "Only https: URLs are supported for anonymous fetches.",
+            "SecurityError"
+          );
+        }
+      }
 
-    // The hidden browser manager controls the lifetime of the hidden browser.
-    return event.run(() =>
-      lazy.HiddenBrowserManager.withHiddenBrowser(
+      // Covers navigating the hidden browser up to onLocationChange, before
+      // the page-ready wait starts. Whichever of three outcomes (navigation
+      // commits, the actor lookup throws, or the load times out) happens
+      // first finishes it; finish()'s idempotency handles the rest.
+      const navigateEvent = new lazy.PageExtractorEvent("headless-navigate", {
+        process: "parent",
+        flowId,
+      });
+
+      // The hidden browser manager controls the lifetime of the hidden browser.
+      return lazy.HiddenBrowserManager.withHiddenBrowser(
         async browser => {
           if (anonymousFetch) {
             // The goal of these settings is to fetch the page without sending
@@ -450,7 +482,7 @@ export class PageExtractorParent extends JSWindowActorParent {
           // message manager group.
           messageManagerGroup: "headless-browsers",
         }
-      )
-    );
+      );
+    });
   }
 }
