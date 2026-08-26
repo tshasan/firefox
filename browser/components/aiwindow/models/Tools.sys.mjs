@@ -49,6 +49,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "moz-src:///browser/components/aiwindow/models/SmartWindowNavigationInfo.sys.mjs",
   ToolUITelemetry:
     "moz-src:///browser/components/aiwindow/ui/modules/ToolUITelemetry.sys.mjs",
+  URILoadingHelper: "resource:///modules/URILoadingHelper.sys.mjs",
   // @todo Bug 2009194
   // PageDataService:
   //   "moz-src:///browser/components/pagedata/PageDataService.sys.mjs",
@@ -887,6 +888,63 @@ function raceAbort(promise, signal) {
 }
 
 /**
+ * Puts a detected bot-detection challenge in front of the user by opening a
+ * small, chromeless popup window at `url`, so they can solve it. This is the
+ * `onChallenge` hook for `PageExtractorParent.getHeadlessExtractor` --
+ * toolkit/'s PageExtractorParent has no window/tab concept of its own, so it
+ * owns only the poll loop that watches the actor this returns and calls
+ * `close()` once the challenge clears.
+ *
+ * @param {URL} url
+ * @param {string} _provider
+ * @returns {{
+ *   getActor: () => PageExtractorParent | null,
+ *   isClosed: () => boolean,
+ *   close: () => void,
+ *   dispose: () => void,
+ * }}
+ */
+function openChallengePopup(url, _provider) {
+  const win = Services.wm.getMostRecentWindow("navigator:browser");
+  if (!win?.gBrowser) {
+    throw new DOMException(
+      "No browser window is available to show the challenge to the user.",
+      "BlockedError"
+    );
+  }
+
+  let popupWindow = null;
+  let popupBrowser = null;
+  let popupClosed = false;
+  const onUnload = () => {
+    popupClosed = true;
+  };
+
+  // openWebLinkIn (rather than openTrustedLinkIn) so this loads with a null
+  // principal, never the system principal, for the same reason the headless
+  // load itself does.
+  lazy.URILoadingHelper.openWebLinkIn(win, url.href, "chromeless", {
+    width: 500,
+    height: 650,
+    resolveOnContentBrowserCreated: browser => {
+      popupBrowser = browser;
+      popupWindow = browser.ownerGlobal;
+      popupWindow.addEventListener("unload", onUnload, { once: true });
+    },
+  });
+
+  return {
+    getActor: () => {
+      const windowGlobal = popupBrowser?.browsingContext?.currentWindowGlobal;
+      return windowGlobal ? windowGlobal.getActor("PageExtractor") : null;
+    },
+    isClosed: () => popupClosed,
+    close: () => popupWindow?.close(),
+    dispose: () => popupWindow?.removeEventListener("unload", onUnload),
+  };
+}
+
+/**
  * Class for handling page content extraction with configurable modes and limits.
  */
 export class GetPageContent {
@@ -1130,6 +1188,7 @@ export class GetPageContent {
           signal,
           flowId
         ),
+      onChallenge: openChallengePopup,
     });
   }
 

@@ -29,7 +29,15 @@ const lazy = XPCOMUtils.declareLazy({
     pref: "browser.ml.pageExtractor.headlessTimeoutMs",
     default: 15000,
   },
+  captchaInterventionTimeoutMs: {
+    pref: "browser.ml.pageExtractor.captchaInterventionTimeoutMs",
+    default: 120000,
+  },
 });
+
+// A POC's poll cadence isn't worth a pref: there is exactly one call site,
+// and nothing plausibly needs to tune it.
+const CAPTCHA_POLL_INTERVAL_MS = 1000;
 
 // NOTE: Copied from nsSandboxFlags.h.
 // Blocks window.open / target="_blank" popups.
@@ -53,6 +61,23 @@ const SANDBOXED_PRESENTATION = 0x4000;
 const SANDBOXED_STORAGE_ACCESS = 0x8000;
 // Blocks downloads initiated by the page.
 const SANDBOXED_DOWNLOADS = 0x10000;
+
+/**
+ * Puts a detected challenge in front of the user (e.g. by opening a popup
+ * window at `url`) so they can solve it. The `browser/` caller owns this,
+ * since `toolkit/`'s PageExtractorParent has no window/tab concept of its
+ * own.
+ *
+ * @callback OnChallengeHook
+ * @param {URL} url
+ * @param {string} provider
+ * @returns {{
+ *   getActor: () => PageExtractorParent | null,
+ *   isClosed: () => boolean,
+ *   close: () => void,
+ *   dispose: () => void,
+ * }}
+ */
 
 /**
  * Resolves user- or model-supplied URL text to its canonical absolute form.
@@ -106,6 +131,39 @@ function isSameSite(hostA, hostB) {
 }
 
 /**
+ * Rejects with an AbortError as soon as `signal` aborts, without waiting for
+ * `promise` to settle on its own. A late rejection from `promise` (e.g. once
+ * an abort tears down the page it was reading) is swallowed so it is not
+ * reported as unhandled.
+ *
+ * @param {Promise<any>} promise
+ * @param {AbortSignal} signal
+ * @returns {Promise<any>}
+ */
+function raceAbort(promise, signal) {
+  promise.catch(() => {});
+  return new Promise((resolve, reject) => {
+    const onAbort = () =>
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      value => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      error => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
+/**
  * Extract a variety of content from pages for use in a smart window.
  */
 export class PageExtractorParent extends JSWindowActorParent {
@@ -129,6 +187,36 @@ export class PageExtractorParent extends JSWindowActorParent {
   }
 
   /**
+   * Waits for the page to be ready and checks it for a known challenge in a
+   * single round trip. Used by the headless-extraction flow's initial
+   * post-navigation check, where calling `waitForPageReady()` and
+   * `detectCaptcha()` separately would pay for two queries on every headless
+   * load even though almost none of them are challenges.
+   *
+   * @see PageExtractorChild#waitForHeadlessPageReady
+   *
+   * @param {string} flowId
+   * @returns {Promise<string | null>} the matched challenge provider, or null
+   */
+  async waitForHeadlessPageReady(flowId) {
+    const readyEvent = this.#startEvent("wait-for-ready", { flowId });
+    const captchaEvent = this.#startEvent("detect-captcha", { flowId });
+    try {
+      const provider = await this.sendQuery(
+        "PageExtractorParent:WaitForHeadlessPageReady",
+        { flowId }
+      );
+      readyEvent.finish({ status: "success" });
+      captchaEvent.finish({ status: "success" });
+      return provider;
+    } catch (error) {
+      readyEvent.finish({ status: "error", errorName: error.name });
+      captchaEvent.finish({ status: "error", errorName: error.name });
+      throw error;
+    }
+  }
+
+  /**
    * Get metadata related to the page.
    *
    * @see PageExtractorChild#getPageMetadata
@@ -139,6 +227,25 @@ export class PageExtractorParent extends JSWindowActorParent {
     const event = this.#startEvent("get-page-metadata");
     return event.run(() =>
       this.sendQuery("PageExtractorParent:GetPageMetadata", {
+        flowId: event.flowId,
+      })
+    );
+  }
+
+  /**
+   * Checks whether the page currently loaded in this actor shows a known
+   * bot-detection challenge, so a headless caller can hand off to the user
+   * instead of reading the challenge page itself.
+   *
+   * @see PageExtractorChild#detectCaptcha
+   *
+   * @param {string} flowId
+   * @returns {Promise<string | null>} the matched challenge provider, or null
+   */
+  async detectCaptcha(flowId) {
+    const event = this.#startEvent("detect-captcha", { flowId });
+    return event.run(() =>
+      this.sendQuery("PageExtractorParent:DetectCaptcha", {
         flowId: event.flowId,
       })
     );
@@ -253,6 +360,28 @@ export class PageExtractorParent extends JSWindowActorParent {
   }
 
   /**
+   * Waits for the headless-loaded page to be ready and checks it for a known
+   * challenge.
+   *
+   * @param {PageExtractorParent} actor
+   * @param {string} flowId
+   * @param {URL} url
+   * @returns {Promise<{ actor: PageExtractorParent } | { provider: string }>}
+   */
+  static async #awaitHeadlessPageReady(actor, flowId, url) {
+    const provider = await actor.waitForHeadlessPageReady(flowId);
+    if (provider) {
+      lazy.console.log(
+        `Headless PageExtractor hit a ${provider} challenge, escalating to the user`,
+        url
+      );
+      return { provider };
+    }
+    lazy.console.log("Headless PageExtractor is ready", url);
+    return { actor };
+  }
+
+  /**
    * Get a Headless PageExtractor. It is available until the callback's returned
    * Promise is resolved. Then the headless browser is cleaned up.
    *
@@ -267,9 +396,20 @@ export class PageExtractorParent extends JSWindowActorParent {
    *   to pass into a follow-up `actor.getText(options, flowId)` call so it
    *   correlates with this request.
    * @param {boolean} [options.anonymousFetch]
+   * @param {OnChallengeHook} [options.onChallenge] - Puts a detected
+   *   challenge in front of the user so they can solve it. Without this, a
+   *   detected challenge is reported as a BlockedError instead of escalated
+   *   -- same as an anonymousFetch request, which never escalates, since
+   *   handing an anonymous request off to a credentialed, foreground tab
+   *   would defeat the point of asking for anonymity.
    * @returns {Promise<T>}
    */
-  static async getHeadlessExtractor({ urlString, callback, anonymousFetch }) {
+  static async getHeadlessExtractor({
+    urlString,
+    callback,
+    anonymousFetch,
+    onChallenge,
+  }) {
     const event = new lazy.PageExtractorEvent("headless-extractor", {
       process: "parent",
       strategy: anonymousFetch ? "headless-anonymous" : "headless",
@@ -314,8 +454,13 @@ export class PageExtractorParent extends JSWindowActorParent {
         flowId,
       });
 
-      // The hidden browser manager controls the lifetime of the hidden browser.
-      return lazy.HiddenBrowserManager.withHiddenBrowser(
+      // The hidden browser manager controls the lifetime of the hidden
+      // browser. Its callback only keeps the browser checked out for as long
+      // as it's actually useful: through the callback() call on the normal
+      // path, but only up to challenge-detection on the escalation path --
+      // once escalated, the real work happens in a foreground tab that has
+      // nothing to do with this hidden browser.
+      const outcome = await lazy.HiddenBrowserManager.withHiddenBrowser(
         async browser => {
           if (anonymousFetch) {
             // The goal of these settings is to fetch the page without sending
@@ -362,8 +507,8 @@ export class PageExtractorParent extends JSWindowActorParent {
           // that simply never responded.
           let challengeHost = null;
 
-          /** @type {PromiseWithResolvers<PageExtractorParent>} */
-          let actorResolver = Promise.withResolvers();
+          /** @type {PromiseWithResolvers<{ actor: PageExtractorParent } | { provider: string }>} */
+          const actorResolver = Promise.withResolvers();
 
           const locationChangeFlags = Ci.nsIWebProgress.NOTIFY_LOCATION;
           const onLocationChange = {
@@ -411,11 +556,12 @@ export class PageExtractorParent extends JSWindowActorParent {
                   );
 
                 navigateEvent.finish({ status: "success" });
-                actor.waitForPageReady(flowId).then(
-                  () => {
-                    lazy.console.log("Headless PageExtractor is ready", url);
-                    actorResolver.resolve(actor);
-                  },
+                PageExtractorParent.#awaitHeadlessPageReady(
+                  actor,
+                  flowId,
+                  url
+                ).then(
+                  readyOutcome => actorResolver.resolve(readyOutcome),
                   error => actorResolver.reject(error)
                 );
               } catch (error) {
@@ -488,14 +634,22 @@ export class PageExtractorParent extends JSWindowActorParent {
             );
           }, timeoutMs);
 
-          let actor;
+          /** @type {{ actor: PageExtractorParent } | { provider: string }} */
+          let readyOutcome;
           try {
-            actor = await actorResolver.promise;
+            readyOutcome = await actorResolver.promise;
           } finally {
             lazy.clearTimeout(timeoutId);
           }
 
-          return callback(actor, flowId);
+          if ("provider" in readyOutcome) {
+            // Nothing left for the hidden browser to do: the real work, if
+            // any, happens in a foreground tab that has no relationship to
+            // it. Return now so HiddenBrowserManager tears it down instead
+            // of holding it open for the whole user-intervention wait.
+            return readyOutcome;
+          }
+          return { result: await callback(readyOutcome.actor, flowId) };
         },
         {
           // Create a custom message manager group for this browser so that the PageExtractor
@@ -504,6 +658,134 @@ export class PageExtractorParent extends JSWindowActorParent {
           messageManagerGroup: "headless-browsers",
         }
       );
+
+      if ("result" in outcome) {
+        return outcome.result;
+      }
+
+      const { provider } = outcome;
+      if (anonymousFetch || !onChallenge) {
+        throw new DOMException(
+          `The page at ${url.href} is blocked by a ${provider} challenge.`,
+          "BlockedError"
+        );
+      }
+
+      const interventionAbort = new AbortController();
+      const interventionTimeoutId = lazy.setTimeout(() => {
+        interventionAbort.abort(
+          new DOMException(
+            `The user did not clear the ${provider} challenge at ${url.href} within ${lazy.captchaInterventionTimeoutMs}ms.`,
+            "TimeoutError"
+          )
+        );
+      }, lazy.captchaInterventionTimeoutMs);
+
+      let actor, close;
+      try {
+        ({ actor, close } =
+          await PageExtractorParent.#resolveCaptchaWithUserIntervention(
+            onChallenge,
+            url,
+            provider,
+            flowId,
+            interventionAbort.signal
+          ));
+      } finally {
+        lazy.clearTimeout(interventionTimeoutId);
+      }
+      try {
+        return await callback(actor, flowId);
+      } finally {
+        close();
+      }
+    });
+  }
+
+  /**
+   * Prototype hand-off for a challenge the headless browser can't solve on
+   * its own: uses the caller-supplied `onChallenge` hook to put `url` in
+   * front of the user, then polls until the challenge clears.
+   *
+   * On success, returns the actor along with a `close` the caller must call
+   * once done with it -- deferred to the caller rather than closed here, so
+   * the popup (and its actor) stays alive for as long as extraction actually
+   * needs it. On any failure (timeout, abort, or the user closing the
+   * window), closes the popup itself before rethrowing, since in that case
+   * nothing else ever will.
+   *
+   * This is a POC for the end-to-end user-intervention flow, not a
+   * production design: it polls rather than reacting to page events.
+   *
+   * @param {OnChallengeHook} onChallenge
+   * @param {URL} url
+   * @param {string} provider
+   * @param {string} flowId
+   * @param {AbortSignal} signal - Stops polling once the caller's
+   *   intervention budget is spent.
+   * @returns {Promise<{ actor: PageExtractorParent, close: () => void }>}
+   */
+  static async #resolveCaptchaWithUserIntervention(
+    onChallenge,
+    url,
+    provider,
+    flowId,
+    signal
+  ) {
+    const event = new lazy.PageExtractorEvent("captcha-intervention", {
+      process: "parent",
+      innerWindowId: 0,
+      flowId,
+      strategy: provider,
+    });
+    return event.run(async () => {
+      const { getActor, isClosed, close, dispose } = onChallenge(url, provider);
+      try {
+        while (!isClosed() && !signal.aborted) {
+          try {
+            const actor = getActor();
+            if (actor) {
+              const matchedProvider = await raceAbort(
+                actor.detectCaptcha(flowId),
+                signal
+              );
+              if (!matchedProvider) {
+                return { actor, close };
+              }
+            }
+          } catch (error) {
+            if (signal.aborted) {
+              throw error;
+            }
+            // Between opening the tab and the requested URL's load
+            // committing, the tab briefly sits on about:blank (or an
+            // intermediate redirect hop), where the actor doesn't match;
+            // treat that, like any other transient failure to reach the
+            // actor, as "not ready yet" rather than aborting the wait.
+            lazy.console.log(
+              "Transient error polling the intervention tab, retrying",
+              error
+            );
+          }
+          await raceAbort(
+            new Promise(resolve =>
+              lazy.setTimeout(resolve, CAPTCHA_POLL_INTERVAL_MS)
+            ),
+            signal
+          );
+        }
+        throw new DOMException(
+          isClosed()
+            ? `The user closed the window opened to solve the ${provider} challenge at ${url.href}.`
+            : `Stopped polling ${url.href} for the ${provider} challenge to clear.`,
+          "AbortError"
+        );
+      } catch (error) {
+        close();
+        throw error;
+      } finally {
+        dispose();
+      }
     });
   }
 }

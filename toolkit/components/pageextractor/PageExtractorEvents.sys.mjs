@@ -87,6 +87,8 @@ const PHASES = {
   "headless-navigate": { label: "Navigate to page" },
   "wait-for-ready": { label: "Wait for page to finish loading" },
   "get-page-metadata": { label: "Read page details" },
+  "detect-captcha": { label: "Check for a bot-detection challenge" },
+  "captcha-intervention": { label: "Wait for the user to solve a challenge" },
   "get-text": { label: "Extract page text" },
   "pdf-extract": { label: "Read PDF text" },
   "reader-parse": { label: "Simplify page (Reader Mode)" },

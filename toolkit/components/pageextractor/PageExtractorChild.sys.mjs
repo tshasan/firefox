@@ -33,6 +33,8 @@ const lazy = XPCOMUtils.declareLazy({
     "moz-src:///toolkit/components/pageextractor/YouTubeExtraction.sys.mjs",
   getYouTubeContent:
     "moz-src:///toolkit/components/pageextractor/YouTubeExtraction.sys.mjs",
+  detectChallengeProvider:
+    "moz-src:///toolkit/components/pageextractor/ChallengeDetection.sys.mjs",
   PageExtractorEvent:
     "moz-src:///toolkit/components/pageextractor/PageExtractorEvents.sys.mjs",
   isProbablyReaderable: "resource://gre/modules/Readerable.sys.mjs",
@@ -72,9 +74,15 @@ export class PageExtractorChild extends JSWindowActorChild {
         return this.getText(options, flowId);
       }
       case "PageExtractorParent:WaitForPageReady":
-        return this.waitForPageReady(data?.flowId);
+        await this.waitForPageReady(data?.flowId);
+        return undefined;
+      case "PageExtractorParent:WaitForHeadlessPageReady":
+        await this.waitForPageReady(data?.flowId);
+        return this.#detectCaptcha(data?.flowId);
       case "PageExtractorParent:GetPageMetadata":
         return this.#getPageMetadata(data?.flowId);
+      case "PageExtractorParent:DetectCaptcha":
+        return this.#detectCaptcha(data?.flowId);
     }
     return Promise.reject(new Error("Unknown message: " + name));
   }
@@ -106,11 +114,16 @@ export class PageExtractorChild extends JSWindowActorChild {
         });
       });
 
+      // #isPageReady is set only when the double rAF below runs. A hidden
+      // document skips it: rAF never fires while hidden. A caller that
+      // later needs the layout/paint guarantee -- e.g. once the tab is
+      // foregrounded -- must still wait for it.
       const wasHidden = doc.hidden;
       if (!wasHidden) {
         await new Promise(resolve => {
           win.requestAnimationFrame(() => win.requestAnimationFrame(resolve));
         });
+        this.#isPageReady = true;
       }
 
       event.finish({ status: wasHidden ? "document-hidden" : "success" });
@@ -149,7 +162,22 @@ export class PageExtractorChild extends JSWindowActorChild {
       event.addData({ strategy });
       return result;
     });
-    this.#isPageReady = true;
+  }
+
+  /**
+   * @see PageExtractorParent#detectCaptcha for docs
+   *
+   * @param {string | undefined} flowId
+   * @returns {Promise<string | null>} the matched challenge provider, or null
+   */
+  async #detectCaptcha(flowId) {
+    const event = this.#startEvent("detect-captcha", { flowId });
+    return event.run(() => {
+      const document = this.browsingContext?.window?.document;
+      const provider = lazy.detectChallengeProvider(document);
+      event.addData({ strategy: provider ?? "none" });
+      return provider;
+    });
   }
 
   /**
