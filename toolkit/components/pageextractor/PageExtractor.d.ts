@@ -78,8 +78,6 @@ export type PageMetadata = {
   // or a registration wall. Derived from the schema.org `isAccessibleForFree`
   // markup, so this is only ever true for pages that annotate themselves.
   isGated: boolean;
-  // The SEO, social and schema.org metadata the page declares about itself.
-  structuredMetadata: StructuredMetadata;
 };
 
 export type MetadataSource = "html" | "opengraph" | "twitter";

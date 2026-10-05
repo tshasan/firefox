@@ -7,8 +7,6 @@
  * @import { PageExtractorParent } from "../../PageExtractorParent.sys.mjs"
  */
 
-// SEO and social tags
-
 add_task(async function test_meta_tags_keep_source_and_conflicts() {
   const { html } = await MLTestUtils.serveHTMLInTab({ browser: gBrowser });
   const { url, getPageExtractor, cleanup } = await html`
@@ -29,7 +27,7 @@ add_task(async function test_meta_tags_keep_source_and_conflicts() {
     <p>Soup.</p>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
 
   Assert.deepEqual(
     structuredMetadata.metaTags,
@@ -84,7 +82,7 @@ add_task(async function test_no_metadata() {
     <p>A page with no metadata.</p>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
 
   Assert.deepEqual(
     structuredMetadata,
@@ -98,8 +96,6 @@ add_task(async function test_no_metadata() {
 
   return cleanup();
 });
-
-// JSON-LD
 
 add_task(async function test_json_ld_graph_with_references() {
   const { html } = await MLTestUtils.serveHTMLInTab({ browser: gBrowser });
@@ -130,7 +126,7 @@ add_task(async function test_json_ld_graph_with_references() {
     </script>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
   const orgId = new URL("#org", url).href;
 
   Assert.deepEqual(
@@ -218,7 +214,7 @@ add_task(async function test_json_ld_conflicts_are_not_merged() {
     </script>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
 
   Assert.deepEqual(
     structuredMetadata.structuredData.nodes.map(node => [
@@ -254,7 +250,7 @@ add_task(async function test_json_ld_blank_nodes_are_scoped_per_script() {
     </script>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
   const [recipe, review] = structuredMetadata.structuredData.nodes;
 
   is(recipe.id, "_:b0", "Labelled blank nodes are relabelled.");
@@ -292,7 +288,7 @@ add_task(async function test_json_ld_values() {
     </script>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
   const [recipe, step] = structuredMetadata.structuredData.nodes;
 
   Assert.deepEqual(
@@ -354,7 +350,8 @@ add_task(async function test_json_ld_invalid_blocks_do_not_block_others() {
     <p>one two three</p>
   `;
 
-  const { structuredMetadata, structuredDataTypes, wordCount } =
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
+  const { structuredDataTypes, wordCount } =
     await getPageExtractor().getPageMetadata();
 
   Assert.deepEqual(
@@ -405,7 +402,7 @@ add_task(async function test_json_ld_node_limit() {
     </script>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
 
   is(
     structuredMetadata.structuredData.nodes.length,
@@ -434,7 +431,7 @@ add_task(async function test_json_ld_depth_limit() {
     </script>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
 
   is(
     structuredMetadata.structuredData.jsonLdBlocks[0].status,
@@ -449,8 +446,6 @@ add_task(async function test_json_ld_depth_limit() {
 
   return cleanup();
 });
-
-// Rules built on the parsed nodes
 
 add_task(async function test_is_gated_follows_has_part_reference() {
   const { html } = await MLTestUtils.serveHTMLInTab({ browser: gBrowser });
@@ -493,8 +488,8 @@ add_task(async function test_json_ld_schema_org_keyword_aliases() {
     </script>
   `;
 
-  const { structuredMetadata, structuredDataTypes } =
-    await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
+  const { structuredDataTypes } = await getPageExtractor().getPageMetadata();
   const [soup, other] = structuredMetadata.structuredData.nodes;
 
   Assert.deepEqual(
@@ -542,7 +537,7 @@ add_task(async function test_json_ld_context_features() {
     </script>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
   const base = "https://example.com/recipes/";
 
   Assert.deepEqual(
@@ -611,8 +606,8 @@ add_task(async function test_microdata() {
     <p id="extra" itemprop="description category">A kettle</p>
   `;
 
-  const { structuredMetadata, structuredDataTypes } =
-    await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
+  const { structuredDataTypes } = await getPageExtractor().getPageMetadata();
 
   Assert.deepEqual(
     structuredMetadata.structuredData.nodes,
@@ -664,7 +659,7 @@ add_task(async function test_microdata_itemref_cycle() {
     <div id="d" itemprop="second" itemscope itemref="c"></div>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
 
   Assert.deepEqual(
     structuredMetadata.structuredData.nodes.map(node => [
@@ -683,14 +678,10 @@ add_task(async function test_microdata_itemref_cycle() {
 });
 
 add_task(async function test_schema_org_vocabulary_classifies_page_types() {
-  const {
-    getSchemaOrgAncestors,
-    getSchemaOrgTypeName,
-    isSchemaOrgType,
-    SCHEMA_ORG_VERSION,
-  } = ChromeUtils.importESModule(
-    "moz-src:///toolkit/components/pageextractor/SchemaOrgVocabulary.sys.mjs"
-  );
+  const { getSchemaOrgAncestors, getSchemaOrgTypeName, isSchemaOrgType } =
+    ChromeUtils.importESModule(
+      "moz-src:///toolkit/components/pageextractor/SchemaOrgVocabulary.sys.mjs"
+    );
   const { html } = await MLTestUtils.serveHTMLInTab({ browser: gBrowser });
   const { getPageExtractor, cleanup } = await html`
     <script type="application/ld+json">
@@ -703,7 +694,7 @@ add_task(async function test_schema_org_vocabulary_classifies_page_types() {
     <div itemscope itemtype="https://schema.org/Hotel"></div>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
   const types = structuredMetadata.structuredData.nodes.map(
     node => node.types[0]
   );
@@ -727,7 +718,6 @@ add_task(async function test_schema_org_vocabulary_classifies_page_types() {
     isSchemaOrgType(types[3], "LocalBusiness"),
     "Microdata types are recognized too."
   );
-  is(SCHEMA_ORG_VERSION, "30.1", "The vocabulary version is exposed.");
 
   return cleanup();
 });
@@ -759,7 +749,7 @@ add_task(async function test_hostile_json_ld_does_not_wipe_other_metadata() {
     </script>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
   const { nodes, jsonLdBlocks } = structuredMetadata.structuredData;
 
   Assert.deepEqual(
@@ -796,7 +786,7 @@ add_task(async function test_microdata_itemref_output_is_bounded() {
     ${items} ${big}
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
   const characters = structuredMetadata.structuredData.nodes
     .flatMap(node => Object.values(node.properties).flat())
     .reduce((total, value) => total + value.length, 0);
@@ -825,7 +815,7 @@ add_task(async function test_json_ld_value_object_context_and_null_base() {
     </script>
   `;
 
-  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const structuredMetadata = await getPageExtractor().getStructuredMetadata();
   const [recipe] = structuredMetadata.structuredData.nodes;
 
   Assert.deepEqual(

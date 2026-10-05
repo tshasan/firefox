@@ -26,7 +26,7 @@ export function getSchemaOrgTypeName(type) {
 
 /**
  * @param {string} type - A type as written by the page.
- * @returns {string[]} The schema.org types it inherits from, nearest first,
+ * @returns {readonly string[]} The schema.org types it inherits from, nearest first,
  *   e.g. ["Article", "CreativeWork", "Thing"] for "NewsArticle".
  */
 export function getSchemaOrgAncestors(type) {
@@ -34,6 +34,27 @@ export function getSchemaOrgAncestors(type) {
   if (!name) {
     return [];
   }
+  let cached = ancestorsByType.get(name);
+  if (!cached) {
+    cached = Object.freeze(collectAncestors(name));
+    ancestorsByType.set(name, cached);
+  }
+  return cached;
+}
+
+/**
+ * The vocabulary never changes, and consumers ask about the same few types
+ * for every node on every page.
+ *
+ * @type {Map<string, readonly string[]>}
+ */
+const ancestorsByType = new Map();
+
+/**
+ * @param {string} name - A schema.org type name.
+ * @returns {string[]}
+ */
+function collectAncestors(name) {
   const ancestors = new Set();
   const pending = [...SCHEMA_ORG_TYPE_PARENTS[name]];
   while (pending.length) {

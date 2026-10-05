@@ -39,10 +39,14 @@ const start = Date.now();
 PageExtractorParent.getHeadlessExtractor({
   urlString: url,
   anonymousFetch: true,
-  callback: actor => actor.getPageMetadata(),
+  callback: (actor, traceId) =>
+    Promise.all([
+      actor.getPageMetadata(),
+      actor.getStructuredMetadata(traceId),
+    ]),
 }).then(
-  metadata => {
-    const types = metadata.structuredMetadata.structuredData.nodes
+  ([metadata, structuredMetadata]) => {
+    const types = structuredMetadata.structuredData.nodes
       .filter(node => node.isTopLevel)
       .flatMap(node =>
         node.types.map(type => ({
@@ -67,7 +71,7 @@ PageExtractorParent.getHeadlessExtractor({
       isReaderable: metadata.isReaderable,
       isGated: metadata.isGated,
       types,
-      structuredMetadata: metadata.structuredMetadata,
+      structuredMetadata,
     });
   },
   error =>

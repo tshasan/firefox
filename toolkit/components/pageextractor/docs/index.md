@@ -86,7 +86,7 @@ early stopping, or canvas capture.
 
 ## Read the page's own metadata
 
-`getPageMetadata` returns `structuredMetadata`, the metadata a page declares
+`getStructuredMetadata` returns the metadata a page declares
 about itself, kept apart from the extracted text:
 
 - `metaTags`: description, keywords, author and robots `<meta>` tags, Open Graph

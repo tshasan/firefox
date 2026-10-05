@@ -45,6 +45,8 @@ const browserWindow = window.browsingContext.topChromeWindow;
 const tabPicker = /** @type {HTMLSelectElement} */ (
   document.getElementById("tab-picker")
 );
+/** @type {Map<string, MozTabbrowserTab>} */
+let tabsByValue = new Map();
 
 /**
  * @param {string} tag
@@ -52,7 +54,7 @@ const tabPicker = /** @type {HTMLSelectElement} */ (
  * @param {(Node | string)[]} [children]
  * @returns {HTMLElement}
  */
-function h(tag, properties = {}, children = []) {
+function buildElement(tag, properties = {}, children = []) {
   const element = Object.assign(document.createElement(tag), properties);
   element.append(...children);
   return element;
@@ -71,9 +73,14 @@ function renderType(type) {
   } else if (ancestors.length) {
     lineage = ` is a kind of ${ancestors.join(" › ")}`;
   }
-  return h("span", {}, [
-    h("span", { className: "declared-type", textContent: name ?? type }),
-    lineage ? h("span", { className: "lineage", textContent: lineage }) : "",
+  return buildElement("span", {}, [
+    buildElement("span", {
+      className: "declared-type",
+      textContent: name ?? type,
+    }),
+    lineage
+      ? buildElement("span", { className: "lineage", textContent: lineage })
+      : "",
   ]);
 }
 
@@ -87,24 +94,21 @@ function fillTabPicker() {
   const ownTab = viewerTab();
   const tabs = browserWindow.gBrowser.tabs.filter(tab => tab != ownTab);
   const previous = tabPicker.value;
+  tabsByValue = new Map(tabs.map((tab, index) => [String(index), tab]));
   tabPicker.replaceChildren(
-    ...tabs.map((tab, index) =>
-      h("option", {
-        value: String(index),
-        textContent: tab.label,
-        tab,
-      })
+    ...[...tabsByValue].map(([value, tab]) =>
+      buildElement("option", { value, textContent: tab.label })
     )
   );
-  const options = [...tabPicker.options];
-  const mostRecent = options.reduce(
-    (best, option) =>
-      !best || option.tab.lastAccessed > best.tab.lastAccessed ? option : best,
+  const mostRecent = tabs.reduce(
+    (best, tab) => (!best || tab.lastAccessed > best.lastAccessed ? tab : best),
     null
   );
-  tabPicker.value = options.some(o => o.value == previous)
-    ? previous
-    : (mostRecent?.value ?? "");
+  if (tabsByValue.has(previous)) {
+    tabPicker.value = previous;
+  } else if (mostRecent) {
+    tabPicker.value = String(tabs.indexOf(mostRecent));
+  }
 }
 
 /**
@@ -112,15 +116,15 @@ function fillTabPicker() {
  */
 async function read() {
   const status = document.getElementById("status");
-  const option = tabPicker.selectedOptions[0];
+  const tab = tabsByValue.get(tabPicker.value);
   for (const id of ["summary", "tags", "nodes", "blocks"]) {
     document.getElementById(id).replaceChildren();
   }
-  if (!option) {
+  if (!tab) {
     status.textContent = "Open a web page in another tab to inspect it.";
     return;
   }
-  const browser = option.tab.linkedBrowser;
+  const browser = tab.linkedBrowser;
   let actor;
   try {
     actor =
@@ -134,7 +138,7 @@ async function read() {
   /** @type {StructuredMetadata} */
   let metadata;
   try {
-    ({ structuredMetadata: metadata } = await actor.getPageMetadata());
+    metadata = await actor.getStructuredMetadata();
   } catch (error) {
     status.textContent = `The page could not be read: ${error.message}`;
     return;
@@ -155,7 +159,9 @@ function renderSummary(metadata) {
   const { nodes } = metadata.structuredData;
   /** @type {Map<string, string>} */
   const types = new Map();
-  for (const type of nodes.filter(n => n.isTopLevel).flatMap(n => n.types)) {
+  for (const type of nodes
+    .filter(node => node.isTopLevel)
+    .flatMap(node => node.types)) {
     const key = getSchemaOrgTypeName(type) ?? type;
     if (!types.has(key)) {
       types.set(key, type);
@@ -163,19 +169,23 @@ function renderSummary(metadata) {
   }
   const syntaxes = [
     ...new Set(
-      nodes.map(n => (n.syntax == "json-ld" ? "JSON-LD" : "Microdata"))
+      nodes.map(node => (node.syntax == "json-ld" ? "JSON-LD" : "Microdata"))
     ),
   ];
   document.getElementById("summary").append(
-    h("h2", { textContent: "Declared types" }),
+    buildElement("h2", { textContent: "Declared types" }),
     types.size
-      ? h(
+      ? buildElement(
           "ul",
           {},
-          [...types.values()].map(type => h("li", {}, [renderType(type)]))
+          [...types.values()].map(type =>
+            buildElement("li", {}, [renderType(type)])
+          )
         )
-      : h("p", { textContent: "The page declares no schema.org type." }),
-    h("p", {
+      : buildElement("p", {
+          textContent: "The page declares no schema.org type.",
+        }),
+    buildElement("p", {
       className: "lineage",
       textContent: `${nodes.length} items from ${
         syntaxes.join(" and ") || "no structured data"
@@ -201,54 +211,54 @@ function renderTags(metadata) {
   const rows = [];
   for (const [label, names] of TAG_GROUPS) {
     const found = entries.filter(
-      e =>
-        names.includes(e.name) ||
-        (label == "Address" && e.name == "link rel=canonical")
+      entry =>
+        names.includes(entry.name) ||
+        (label == "Address" && entry.name == "link rel=canonical")
     );
     if (!found.length) {
       continue;
     }
-    found.forEach(e => grouped.add(e));
-    const distinct = new Set(found.map(e => e.value.trim()));
+    found.forEach(entry => grouped.add(entry));
+    const distinct = new Set(found.map(entry => entry.value.trim()));
     rows.push(
-      h("tr", {}, [
-        h("th", {}, [
+      buildElement("tr", {}, [
+        buildElement("th", {}, [
           label,
           distinct.size > 1
-            ? h("span", {
+            ? buildElement("span", {
                 className: "badge conflict",
                 textContent: "sources disagree",
               })
             : "",
         ]),
-        h(
+        buildElement(
           "td",
           {},
-          found.map(e =>
-            h("div", {}, [
-              h("span", {
+          found.map(entry =>
+            buildElement("div", {}, [
+              buildElement("span", {
                 className: "badge",
-                textContent: `${SOURCE_LABELS[e.source]} ${e.name}`,
+                textContent: `${SOURCE_LABELS[entry.source]} ${entry.name}`,
               }),
               " ",
-              e.value,
+              entry.value,
             ])
           )
         ),
       ])
     );
   }
-  for (const e of entries.filter(e => !grouped.has(e))) {
+  for (const entry of entries.filter(entry => !grouped.has(entry))) {
     rows.push(
-      h("tr", {}, [
-        h("th", {}, [e.name]),
-        h("td", {}, [
-          h("span", {
+      buildElement("tr", {}, [
+        buildElement("th", {}, [entry.name]),
+        buildElement("td", {}, [
+          buildElement("span", {
             className: "badge",
-            textContent: SOURCE_LABELS[e.source],
+            textContent: SOURCE_LABELS[entry.source],
           }),
           " ",
-          e.value,
+          entry.value,
         ]),
       ])
     );
@@ -257,8 +267,8 @@ function renderTags(metadata) {
     .getElementById("tags")
     .append(
       rows.length
-        ? h("table", {}, rows)
-        : h("p", { textContent: "No search or social tags." })
+        ? buildElement("table", {}, rows)
+        : buildElement("p", { textContent: "No search or social tags." })
     );
 }
 
@@ -287,75 +297,91 @@ function renderNodes(nodes) {
       return `${value["@value"]}${qualifiers.length ? ` (${qualifiers.join(", ")})` : ""}`;
     }
     if ("@list" in value) {
-      return h(
+      return buildElement(
         "ol",
         {},
-        value["@list"].map(item => h("li", {}, [renderValue(item)]))
+        value["@list"].map(item => buildElement("li", {}, [renderValue(item)]))
       );
     }
     const index = firstIndex.get(value["@id"]);
     if (index === undefined) {
-      return h("span", { className: "id", textContent: value["@id"] });
+      return buildElement("span", {
+        className: "id",
+        textContent: value["@id"],
+      });
     }
     const target = nodes[index];
     const name = target.properties.name?.[0];
     const label = [
-      target.types.map(t => getSchemaOrgTypeName(t) ?? t).join("/"),
+      target.types.map(type => getSchemaOrgTypeName(type) ?? type).join("/"),
       name !== undefined && typeof name != "object" ? `"${name}"` : "",
     ]
       .filter(Boolean)
       .join(" ");
-    return h("a", {
+    return buildElement("a", {
       href: `#node-${index}`,
       textContent: `→ ${label || value["@id"]}`,
     });
   };
 
+  const indices = [...nodes.keys()];
   const order = [
-    ...nodes.filter(n => n.isTopLevel),
-    ...nodes.filter(n => !n.isTopLevel),
+    ...indices.filter(index => nodes[index].isTopLevel),
+    ...indices.filter(index => !nodes[index].isTopLevel),
   ];
   document.getElementById("nodes").append(
-    ...order.map(node =>
-      h("article", { className: "card", id: `node-${nodes.indexOf(node)}` }, [
-        h("div", { className: "card-header" }, [
-          ...(node.types.length
-            ? node.types.map(renderType)
-            : [h("span", { className: "declared-type", textContent: "Item" })]),
-          h("span", {
-            className: "badge",
-            textContent:
-              node.syntax == "json-ld"
-                ? `JSON-LD block ${node.blockIndex + 1}`
-                : "Microdata",
-          }),
-          h("span", {
-            className: "badge",
-            textContent: node.isTopLevel ? "top level" : "nested",
-          }),
-          h("span", { className: "id", textContent: node.id }),
-        ]),
-        h(
-          "table",
-          {},
-          Object.entries(node.properties).map(([property, values]) =>
-            h("tr", {}, [
-              h("th", { textContent: property }),
-              h(
-                "td",
-                {},
-                values.map(value => h("div", {}, [renderValue(value)]))
-              ),
-            ])
-          )
-        ),
-      ])
-    )
+    ...order.map(index => {
+      const node = nodes[index];
+      return buildElement(
+        "article",
+        { className: "card", id: `node-${index}` },
+        [
+          buildElement("div", { className: "card-header" }, [
+            ...(node.types.length
+              ? node.types.map(renderType)
+              : [
+                  buildElement("span", {
+                    className: "declared-type",
+                    textContent: "Item",
+                  }),
+                ]),
+            buildElement("span", {
+              className: "badge",
+              textContent:
+                node.syntax == "json-ld"
+                  ? `JSON-LD block ${node.blockIndex + 1}`
+                  : "Microdata",
+            }),
+            buildElement("span", {
+              className: "badge",
+              textContent: node.isTopLevel ? "top level" : "nested",
+            }),
+            buildElement("span", { className: "id", textContent: node.id }),
+          ]),
+          buildElement(
+            "table",
+            {},
+            Object.entries(node.properties).map(([property, values]) =>
+              buildElement("tr", {}, [
+                buildElement("th", { textContent: property }),
+                buildElement(
+                  "td",
+                  {},
+                  values.map(value =>
+                    buildElement("div", {}, [renderValue(value)])
+                  )
+                ),
+              ])
+            )
+          ),
+        ]
+      );
+    })
   );
   if (!nodes.length) {
     document
       .getElementById("nodes")
-      .append(h("p", { textContent: "No JSON-LD or microdata." }));
+      .append(buildElement("p", { textContent: "No JSON-LD or microdata." }));
   }
 }
 
@@ -366,7 +392,7 @@ function renderBlocks(metadata) {
   const { jsonLdBlocks } = metadata.structuredData;
   document.getElementById("blocks").append(
     ...jsonLdBlocks.map((block, index) =>
-      h("li", {
+      buildElement("li", {
         textContent: `Block ${index + 1}: ${block.status}${
           typeof block.context == "string" ? `, context ${block.context}` : ""
         }`,
@@ -376,7 +402,7 @@ function renderBlocks(metadata) {
   if (!jsonLdBlocks.length) {
     document
       .getElementById("blocks")
-      .append(h("li", { textContent: "No JSON-LD blocks." }));
+      .append(buildElement("li", { textContent: "No JSON-LD blocks." }));
   }
 }
 

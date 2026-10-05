@@ -28,8 +28,6 @@ const OPEN_GRAPH_PREFIXES = [
   "video:",
 ];
 
-const LINK_RELS = ["canonical"];
-
 const JSON_LD_KEYWORDS = new Set([
   "@base",
   "@context",
@@ -62,10 +60,24 @@ const SCHEMA_ORG_CONTEXT_ALIASES = [
   ["type", "@type"],
 ];
 
+// https://infra.spec.whatwg.org/#ascii-whitespace
+const ASCII_WHITESPACE = /[\t\n\f\r ]+/;
+const NOT_ASCII_WHITESPACE = /[^\t\n\f\r ]/;
+
+// The limits below bound the work and the payload a hostile page can cause, as
+// the result is built in the content process and sent to the parent. Each is
+// well above what real pages use: the scan in scripts/ found at most around a
+// hundred tags and a few hundred nodes on a page.
 const MAX_META_TAGS = 500;
+// The JSON-LD text read across all blocks. The parsed nodes are roughly
+// proportional to it.
 const MAX_JSON_LD_TOTAL_LENGTH = 2_000_000;
 const MAX_NODES = 1000;
+// Nesting deeper than this is not meaningful data, and keeps recursion far
+// from the stack limit.
 const MAX_DEPTH = 32;
+// A microdata text value is the element's whole textContent, which can be an
+// entire article.
 const MAX_MICRODATA_VALUE_LENGTH = 10_000;
 // Through itemref, many items can share the same properties, so the work and
 // the output are bounded across all items rather than per item.
@@ -90,6 +102,18 @@ export function extractStructuredMetadata(document) {
     links: attempt(() => extractLinks(document), []),
     structuredData: { nodes: collector.nodes, jsonLdBlocks },
   };
+}
+
+/**
+ * Reads only the JSON-LD nodes, for callers that do not need the rest.
+ *
+ * @param {Document} document
+ * @returns {StructuredDataNode[]}
+ */
+export function extractJsonLdNodes(document) {
+  const collector = new NodeCollector();
+  extractJsonLd(document, collector);
+  return collector.nodes;
 }
 
 /**
@@ -167,9 +191,8 @@ function extractLinks(document) {
   /** @type {LinkEntry[]} */
   const links = [];
   for (const link of document.querySelectorAll("link[rel][href]")) {
-    const rel = LINK_RELS.find(r => link.relList.contains(r));
-    if (rel && link.href) {
-      links.push({ rel, href: link.href });
+    if (link.relList.contains("canonical") && link.href) {
+      links.push({ rel: "canonical", href: link.href });
     }
   }
   return links;
@@ -318,7 +341,7 @@ function extractJsonLd(document, collector) {
   );
 
   for (const [blockIndex, script] of scripts.entries()) {
-    const text = script.textContent ?? "";
+    const text = script.textContent;
     if (text.length > remainingLength) {
       blocks.push({ context: null, status: "too-large" });
       continue;
@@ -390,7 +413,7 @@ function extractJsonLd(document, collector) {
       const { keywords, properties } = readEntries(object, scope);
       const types = [keywords.get("@type")]
         .flat()
-        .filter(t => typeof t == "string");
+        .filter(type => typeof type == "string");
       const reverse = keywords.get("@reverse");
 
       /** @type {StructuredDataValue | null} */
@@ -652,7 +675,7 @@ function extractMicrodata(document, collector) {
  * @returns {string[]} The unique space-separated tokens, in order.
  */
 function tokens(attribute) {
-  return [...new Set(attribute?.split(/[\t\n\f\r ]+/).filter(Boolean))];
+  return [...new Set(attribute?.split(ASCII_WHITESPACE).filter(Boolean))];
 }
 
 /**
@@ -670,7 +693,7 @@ function crawlProperties(root, budget) {
   const pending = [...root.children];
   const rootNode = /** @type {Document | ShadowRoot} */ (root.getRootNode());
   for (const id of tokens(root.getAttribute("itemref"))) {
-    const referenced = rootNode.getElementById?.(id);
+    const referenced = rootNode.getElementById(id);
     if (referenced) {
       pending.push(referenced);
     }
@@ -687,7 +710,8 @@ function crawlProperties(root, budget) {
         pending.push(child);
       }
     }
-    if (tokens(current.getAttribute("itemprop")).length) {
+    // Every visited element is checked, so this avoids splitting the value.
+    if (NOT_ASCII_WHITESPACE.test(current.getAttribute("itemprop") ?? "")) {
       results.push(current);
     }
   }

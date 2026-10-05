@@ -142,7 +142,7 @@ def percent(count, total):
 
 
 def host(url):
-    return urlparse(url).hostname.removeprefix("www.")
+    return (urlparse(url).hostname or url).removeprefix("www.")
 
 
 def bars(rows):

@@ -134,8 +134,6 @@ skip-if = [
 
 ["browser_smartwindow_history_commands.js"]
 
-["browser_smartwindow_page_metadata.js"]
-
 ["browser_smartwindow_history_thumbnails.js"]
 
 ["browser_smartwindow_history_thumbnails_telemetry.js"]
@@ -156,6 +154,8 @@ skip-if = [
 ["browser_smartwindow_metrics_telemetry.js"]
 
 ["browser_smartwindow_nimbus.js"]
+
+["browser_smartwindow_page_metadata.js"]
 
 ["browser_smartwindow_panel_list.js"]
 

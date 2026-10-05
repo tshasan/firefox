@@ -13,14 +13,15 @@ import {
   getSchemaOrgTypeName,
 } from "moz-src:///toolkit/components/pageextractor/SchemaOrgVocabulary.sys.mjs";
 
-export const PAGE_METADATA_PREF = "browser.smartwindow.pageMetadata.enabled";
-
 const SOURCE_LABELS = {
   html: "HTML",
   opengraph: "Open Graph",
   twitter: "Twitter Card",
 };
 
+// These keep the metadata a small addition to get_page_content's 10,000
+// characters of page text: enough for the main items and tags, and no single
+// value long enough to crowd out the others.
 const MAX_NODES = 10;
 const MAX_PROPERTIES = 20;
 const MAX_META_TAGS = 20;
@@ -31,7 +32,7 @@ const MAX_LENGTH = 4000;
  * @param {string} text
  * @returns {string}
  */
-function clean(text) {
+function collapseAndTruncate(text) {
   const collapsed = text.replace(/\s+/g, " ").trim();
   return collapsed.length > MAX_VALUE_LENGTH
     ? collapsed.slice(0, MAX_VALUE_LENGTH) + "…"
@@ -45,9 +46,11 @@ function clean(text) {
 function describeType(type) {
   const name = getSchemaOrgTypeName(type);
   if (!name) {
-    return clean(type);
+    return collapseAndTruncate(type);
   }
-  const ancestors = getSchemaOrgAncestors(name).filter(a => a != "Thing");
+  const ancestors = getSchemaOrgAncestors(name).filter(
+    ancestor => ancestor != "Thing"
+  );
   return ancestors.length
     ? `${name} (a kind of ${ancestors.join(", ")})`
     : name;
@@ -56,7 +59,7 @@ function describeType(type) {
 /**
  * @param {StructuredDataValue} value
  * @param {Map<string, StructuredDataNode>} nodesById
- * @param {boolean} followReferences
+ * @param {boolean} [followReferences]
  * @returns {string}
  */
 function describeValue(value, nodesById, followReferences = true) {
@@ -94,17 +97,18 @@ function describeValue(value, nodesById, followReferences = true) {
  * @param {StructuredMetadata} structuredMetadata
  * @returns {string} An empty string when the page declares nothing.
  */
-export function formatPageMetadataForModel({ metaTags, structuredData }) {
+export function formatPageMetadataForModel(structuredMetadata) {
+  const { nodes } = structuredMetadata.structuredData;
   /** @type {Map<string, StructuredDataNode>} */
   const nodesById = new Map();
-  for (const node of structuredData.nodes) {
+  for (const node of nodes) {
     if (!nodesById.has(node.id)) {
       nodesById.set(node.id, node);
     }
   }
 
   const lines = [];
-  const topLevel = structuredData.nodes.filter(node => node.isTopLevel);
+  const topLevel = nodes.filter(node => node.isTopLevel);
   for (const node of topLevel.slice(0, MAX_NODES)) {
     lines.push(`- ${node.types.map(describeType).join(", ") || "Item"}`);
     for (const [property, values] of Object.entries(node.properties).slice(
@@ -112,11 +116,18 @@ export function formatPageMetadataForModel({ metaTags, structuredData }) {
       MAX_PROPERTIES
     )) {
       const described = values.map(v => describeValue(v, nodesById));
-      lines.push(`  ${clean(property)}: ${clean(described.join("; "))}`);
+      lines.push(
+        `  ${collapseAndTruncate(property)}: ${collapseAndTruncate(described.join("; "))}`
+      );
     }
   }
-  for (const { source, name, value } of metaTags.slice(0, MAX_META_TAGS)) {
-    lines.push(`- ${clean(name)} (${SOURCE_LABELS[source]}): ${clean(value)}`);
+  for (const { source, name, value } of structuredMetadata.metaTags.slice(
+    0,
+    MAX_META_TAGS
+  )) {
+    lines.push(
+      `- ${collapseAndTruncate(name)} (${SOURCE_LABELS[source]}): ${collapseAndTruncate(value)}`
+    );
   }
   if (!lines.length) {
     return "";

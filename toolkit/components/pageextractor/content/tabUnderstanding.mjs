@@ -32,11 +32,15 @@ const SCAFFOLDING_TYPES = new Set([
 ]);
 
 /**
+ * @typedef {Map<string, StructuredDataNode>} NodesById
+ */
+
+/**
  * @typedef {object} Fact
  * @property {string} label - Shown next to the value.
  * @property {string[]} paths - Property paths to try in order, following
  *   references, e.g. "author.name".
- * @property {(value: StructuredDataValue[], node: StructuredDataNode) => string} [format] - Turns
+ * @property {(values: StructuredDataValue[], nodesById: NodesById) => string} [format] - Turns
  *   the values into display text. Defaults to the first literal value.
  */
 
@@ -262,6 +266,12 @@ function formatDuration(values) {
   return parts.join(" ") || text;
 }
 
+const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+const DATE_TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
 /**
  * @param {StructuredDataValue[]} values
  * @returns {string}
@@ -272,11 +282,7 @@ function formatDate(values) {
   if (isNaN(date)) {
     return text;
   }
-  const hasTime = /T\d/.test(text);
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: hasTime ? "short" : undefined,
-  }).format(date);
+  return (/T\d/.test(text) ? DATE_TIME_FORMAT : DATE_FORMAT).format(date);
 }
 
 /**
@@ -290,18 +296,23 @@ function formatEnumeration(values) {
 }
 
 /**
- * Filled in per tab, so that formatters can follow references.
- *
- * @type {(value: StructuredDataValue) => StructuredDataNode | undefined}
+ * @param {StructuredDataValue | undefined} value
+ * @param {NodesById} nodesById
+ * @returns {StructuredDataNode | undefined} The node a reference points to.
  */
-let resolveNode = () => undefined;
+function resolveNode(value, nodesById) {
+  return value && typeof value == "object" && "@id" in value
+    ? nodesById.get(value["@id"])
+    : undefined;
+}
 
 /**
  * @param {StructuredDataValue[]} values
+ * @param {NodesById} nodesById
  * @returns {string} e.g. "★ 4.8 (1,234)".
  */
-function formatRating(values) {
-  const rating = resolveNode(values[0]);
+function formatRating(values, nodesById) {
+  const rating = resolveNode(values[0], nodesById);
   if (!rating) {
     return "";
   }
@@ -322,10 +333,11 @@ function formatRating(values) {
 
 /**
  * @param {StructuredDataValue[]} values
+ * @param {NodesById} nodesById
  * @returns {string}
  */
-function formatPrice(values) {
-  const offer = resolveNode(values[0]);
+function formatPrice(values, nodesById) {
+  const offer = resolveNode(values[0], nodesById);
   if (!offer) {
     return "";
   }
@@ -351,15 +363,16 @@ function formatPrice(values) {
  *
  * @param {StructuredDataNode} node
  * @param {string} path
+ * @param {NodesById} nodesById
  * @returns {StructuredDataValue[]}
  */
-function readPath(node, path) {
+function readPath(node, path, nodesById) {
   let values = [];
   /** @type {StructuredDataNode | undefined} */
   let current = node;
   for (const property of path.split(".")) {
     values = current?.properties[property] ?? [];
-    current = resolveNode(values[0]);
+    current = resolveNode(values[0], nodesById);
   }
   return values;
 }
@@ -432,9 +445,10 @@ function describeType(node) {
  *
  * @param {StructuredDataNode} node
  * @param {string} url
- * @returns {string | null} An object URL, or null without a start date.
+ * @param {NodesById} nodesById
+ * @returns {Blob | null} null when the event has no start date.
  */
-function eventCalendarUrl(node, url) {
+function eventCalendarFile(node, url, nodesById) {
   const start = new Date(literal(node.properties.startDate ?? []));
   if (isNaN(start)) {
     return null;
@@ -453,14 +467,12 @@ function eventCalendarUrl(node, url) {
     `DTSTART:${stamp(start)}`,
     ...(isNaN(end) ? [] : [`DTEND:${stamp(end)}`]),
     `SUMMARY:${escapeText(literal(node.properties.name ?? []))}`,
-    `LOCATION:${escapeText(literal(readPath(node, "location.name")))}`,
+    `LOCATION:${escapeText(literal(readPath(node, "location.name", nodesById)))}`,
     `URL:${url}`,
     "END:VEVENT",
     "END:VCALENDAR",
   ];
-  return URL.createObjectURL(
-    new Blob([lines.join("\r\n")], { type: "text/calendar" })
-  );
+  return new Blob([lines.join("\r\n")], { type: "text/calendar" });
 }
 
 /**
@@ -473,13 +485,20 @@ function eventCalendarUrl(node, url) {
 function renderCard(tab, metadata, kind, durationMs) {
   const { node, group, via } = kind;
   const url = tab.linkedBrowser.currentURI.spec;
+  /** @type {NodesById} */
+  const nodesById = new Map();
+  for (const candidate of metadata.structuredData.nodes) {
+    if (!nodesById.has(candidate.id)) {
+      nodesById.set(candidate.id, candidate);
+    }
+  }
   const facts = [];
   if (node) {
     for (const fact of group.facts) {
       for (const path of fact.paths) {
-        const values = readPath(node, path);
+        const values = readPath(node, path, nodesById);
         const text = values.length
-          ? (fact.format ?? formatText)(values, node).trim()
+          ? (fact.format ?? formatText)(values, nodesById).trim()
           : "";
         if (text) {
           facts.push(
@@ -527,16 +546,17 @@ function renderCard(tab, metadata, kind, durationMs) {
     );
   }
   if (node && group.label == "Events") {
-    const calendarUrl = eventCalendarUrl(node, url);
-    if (calendarUrl) {
+    const calendarFile = eventCalendarFile(node, url, nodesById);
+    if (calendarFile) {
       actions.push(
         buildElement("button", {
           textContent: "Add to calendar",
-          onclick: () =>
-            buildElement("a", {
-              href: calendarUrl,
-              download: "event.ics",
-            }).click(),
+          onclick: () => {
+            const href = URL.createObjectURL(calendarFile);
+            buildElement("a", { href, download: "event.ics" }).click();
+            // The download reads the file asynchronously.
+            setTimeout(() => URL.revokeObjectURL(href));
+          },
         })
       );
     }
@@ -573,30 +593,35 @@ function renderCard(tab, metadata, kind, durationMs) {
 }
 
 /**
+ * @typedef {{ status: "read", metadata: StructuredMetadata, durationMs: number } | { status: "not-loaded" | "not-web" }} TabReading
+ */
+
+/**
  * @param {MozTabbrowserTab} tab
- * @returns {Promise<{ metadata: StructuredMetadata, durationMs: number } | null>}
+ * @returns {Promise<TabReading>}
  */
 async function readTab(tab) {
   const windowGlobal = tab.linkedBrowser.browsingContext?.currentWindowGlobal;
   if (tab.hasAttribute("pending") || !windowGlobal) {
-    return null;
+    return { status: "not-loaded" };
   }
   let actor;
   try {
     actor = windowGlobal.getActor("PageExtractor");
   } catch {
     // Not a web page, e.g. about:newtab.
-    return undefined;
+    return { status: "not-web" };
   }
   const start = performance.now();
   try {
-    const { structuredMetadata } = await actor.getPageMetadata();
+    const metadata = await actor.getStructuredMetadata();
     return {
-      metadata: structuredMetadata,
+      status: "read",
+      metadata,
       durationMs: Math.round(performance.now() - start),
     };
   } catch {
-    return null;
+    return { status: "not-loaded" };
   }
 }
 
@@ -615,20 +640,14 @@ async function render() {
   const cardsByGroup = new Map();
   let read = 0;
   results.forEach((result, index) => {
-    if (result === undefined) {
+    if (result.status == "not-web") {
       return;
     }
     const tab = tabs[index];
     let card;
     let group = NOT_LOADED_GROUP;
-    if (result) {
+    if (result.status == "read") {
       read++;
-      resolveNode = value =>
-        value && typeof value == "object" && "@id" in value
-          ? result.metadata.structuredData.nodes.find(
-              node => node.id == value["@id"]
-            )
-          : undefined;
       const kind = classify(result.metadata);
       group = kind.group;
       card = renderCard(tab, result.metadata, kind, result.durationMs);

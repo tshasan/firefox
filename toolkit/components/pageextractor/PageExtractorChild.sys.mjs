@@ -30,6 +30,8 @@ const lazy = XPCOMUtils.declareLazy({
   ReaderMode: "moz-src:///toolkit/components/reader/ReaderMode.sys.mjs",
   extractTextFromDOM:
     "moz-src:///toolkit/components/pageextractor/DOMExtractor.sys.mjs",
+  extractJsonLdNodes:
+    "moz-src:///toolkit/components/pageextractor/StructuredMetadata.sys.mjs",
   extractStructuredMetadata:
     "moz-src:///toolkit/components/pageextractor/StructuredMetadata.sys.mjs",
   shouldExtractYouTube:
@@ -79,6 +81,15 @@ export class PageExtractorChild extends JSWindowActorChild {
         return this.waitForPageReady(data?.traceId, data?.refreshWithinMs);
       case "PageExtractorParent:GetPageMetadata":
         return this.#getPageMetadata(data?.traceId);
+      case "PageExtractorParent:GetStructuredMetadata": {
+        const { traceId } = data;
+        if (!this.#isPageReady) {
+          await this.waitForPageReady(traceId);
+        }
+        return this.#trace(lazy.Phase.getStructuredMetadata, { traceId }, () =>
+          this.getStructuredMetadata()
+        );
+      }
     }
     return Promise.reject(new Error("Unknown message: " + name));
   }
@@ -214,7 +225,6 @@ export class PageExtractorChild extends JSWindowActorChild {
           language,
           isReaderable: true,
           isGated: false,
-          structuredMetadata: this.#emptyStructuredMetadata(),
         };
         strategy = "about-reader";
       } else {
@@ -240,18 +250,14 @@ export class PageExtractorChild extends JSWindowActorChild {
       );
     }
 
-    let structuredMetadata;
-    try {
-      structuredMetadata = lazy.extractStructuredMetadata(document);
-    } catch (error) {
-      lazy.console.error("Failed to extract structured metadata", error);
-      structuredMetadata = this.#emptyStructuredMetadata();
-    }
     // These rules predate microdata support, and consumers compare the types
     // as JSON-LD writes them.
-    const nodes = structuredMetadata.structuredData.nodes.filter(
-      node => node.syntax == "json-ld"
-    );
+    let nodes = [];
+    try {
+      nodes = lazy.extractJsonLdNodes(document);
+    } catch (error) {
+      lazy.console.error("Failed to read the JSON-LD of the page", error);
+    }
     const structuredDataTypes = this.#getStructuredDataTypes(nodes);
     const isGated = this.#isGated(nodes);
     const language = this.#detectLanguage(document);
@@ -264,8 +270,26 @@ export class PageExtractorChild extends JSWindowActorChild {
       language,
       isReaderable,
       isGated,
-      structuredMetadata,
     };
+  }
+
+  /**
+   * @see PageExtractorParent#getStructuredMetadata for docs
+   *
+   * @returns {StructuredMetadata}
+   */
+  getStructuredMetadata() {
+    const document = this.browsingContext?.window?.document;
+    // about:reader has replaced the page, and with it the page's metadata.
+    if (!document || this.isAboutReader()) {
+      return this.#emptyStructuredMetadata();
+    }
+    try {
+      return lazy.extractStructuredMetadata(document);
+    } catch (error) {
+      lazy.console.error("Failed to extract structured metadata", error);
+      return this.#emptyStructuredMetadata();
+    }
   }
 
   /**

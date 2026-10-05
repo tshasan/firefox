@@ -148,8 +148,6 @@ add_task(async function test_get_page_content_includes_page_metadata() {
     ),
     `The model is told what the page declares, with each source labelled: ${body}`
   );
-
-  await SpecialPowers.popPrefEnv();
 });
 
 add_task(async function test_get_page_content_without_page_metadata() {
@@ -168,6 +166,4 @@ add_task(async function test_get_page_content_without_page_metadata() {
     !body.includes("Metadata the page declares"),
     "Without the pref, the metadata is left out."
   );
-
-  await SpecialPowers.popPrefEnv();
 });
