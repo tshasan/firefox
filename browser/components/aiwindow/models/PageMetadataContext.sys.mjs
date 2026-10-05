@@ -45,7 +45,7 @@ function clean(text) {
 function describeType(type) {
   const name = getSchemaOrgTypeName(type);
   if (!name) {
-    return type;
+    return clean(type);
   }
   const ancestors = getSchemaOrgAncestors(name).filter(a => a != "Thing");
   return ancestors.length
@@ -112,11 +112,11 @@ export function formatPageMetadataForModel({ metaTags, structuredData }) {
       MAX_PROPERTIES
     )) {
       const described = values.map(v => describeValue(v, nodesById));
-      lines.push(`  ${property}: ${clean(described.join("; "))}`);
+      lines.push(`  ${clean(property)}: ${clean(described.join("; "))}`);
     }
   }
   for (const { source, name, value } of metaTags.slice(0, MAX_META_TAGS)) {
-    lines.push(`- ${name} (${SOURCE_LABELS[source]}): ${clean(value)}`);
+    lines.push(`- ${clean(name)} (${SOURCE_LABELS[source]}): ${clean(value)}`);
   }
   if (!lines.length) {
     return "";

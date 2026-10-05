@@ -67,6 +67,10 @@ const MAX_JSON_LD_TOTAL_LENGTH = 2_000_000;
 const MAX_NODES = 1000;
 const MAX_DEPTH = 32;
 const MAX_MICRODATA_VALUE_LENGTH = 10_000;
+// Through itemref, many items can share the same properties, so the work and
+// the output are bounded across all items rather than per item.
+const MAX_MICRODATA_ELEMENTS = 200_000;
+const MAX_MICRODATA_CHARACTERS = 1_000_000;
 
 /**
  * Collects the SEO, social and schema.org metadata a page declares about
@@ -80,12 +84,29 @@ const MAX_MICRODATA_VALUE_LENGTH = 10_000;
 export function extractStructuredMetadata(document) {
   const collector = new NodeCollector();
   const jsonLdBlocks = extractJsonLd(document, collector);
-  extractMicrodata(document, collector);
+  attempt(() => extractMicrodata(document, collector), undefined);
   return {
-    metaTags: extractMetaTags(document),
-    links: extractLinks(document),
+    metaTags: attempt(() => extractMetaTags(document), []),
+    links: attempt(() => extractLinks(document), []),
     structuredData: { nodes: collector.nodes, jsonLdBlocks },
   };
+}
+
+/**
+ * Keeps one malformed source from taking the others down with it.
+ *
+ * @template T
+ * @param {() => T} task
+ * @param {T} fallback
+ * @returns {T}
+ */
+function attempt(task, fallback) {
+  try {
+    return task();
+  } catch (error) {
+    console.error("Failed to extract part of the structured metadata", error);
+    return fallback;
+  }
 }
 
 /**
@@ -222,6 +243,8 @@ function applyContext(scope, context, documentBase) {
         if (term == "@base") {
           if (typeof definition == "string") {
             base = URL.parse(definition, base)?.href ?? base;
+          } else if (definition === null) {
+            base = documentBase;
           }
           continue;
         }
@@ -245,9 +268,10 @@ function applyContext(scope, context, documentBase) {
  *
  * @param {Record<string, any>} object
  * @param {JsonLdScope} scope
+ * @param {number} [depth]
  * @returns {{ keywords: Map<string, any>, properties: [string, any][] }}
  */
-function readEntries(object, scope) {
+function readEntries(object, scope, depth = 0) {
   const keywords = new Map();
   /** @type {[string, any][]} */
   const properties = [];
@@ -256,8 +280,13 @@ function readEntries(object, scope) {
     if (!keyword) {
       properties.push([key, value]);
     } else if (keyword == "@nest") {
+      if (depth >= MAX_DEPTH) {
+        continue;
+      }
       for (const nested of [value].flat().filter(isPlainObject)) {
-        properties.push(...readEntries(nested, scope).properties);
+        for (const entry of readEntries(nested, scope, depth + 1).properties) {
+          properties.push(entry);
+        }
       }
     } else {
       keywords.set(keyword, value);
@@ -351,6 +380,10 @@ function extractJsonLd(document, collector) {
      * @returns {StructuredDataValue | null} A reference to the node.
      */
     const visitNode = (object, scope, isTopLevel, depth) => {
+      if (depth > MAX_DEPTH) {
+        truncated = true;
+        return null;
+      }
       if ("@context" in object) {
         scope = applyContext(scope, object["@context"], documentBase);
       }
@@ -382,7 +415,7 @@ function extractJsonLd(document, collector) {
         for (const [key, value] of properties) {
           const values = toValues(value, scope, depth + 1);
           if (values.length) {
-            (node.properties[key] ??= []).push(...values);
+            node.properties[key] = (node.properties[key] ?? []).concat(values);
           }
         }
         if (isPlainObject(reverse)) {
@@ -449,7 +482,11 @@ function extractJsonLd(document, collector) {
       if (Array.isArray(value)) {
         return value.flatMap(item => toValues(item, scope, depth + 1));
       }
-      const { keywords } = readEntries(value, scope);
+      const valueScope =
+        "@context" in value
+          ? applyContext(scope, value["@context"], documentBase)
+          : scope;
+      const { keywords } = readEntries(value, valueScope);
       if (keywords.has("@value")) {
         const literal = keywords.get("@value");
         if (literal === null || typeof literal == "object") {
@@ -501,11 +538,16 @@ function extractJsonLd(document, collector) {
     /** @type {JsonLdScope} */
     const rootScope = { aliases: new Map(), base: documentBase };
     let context = null;
-    for (const item of [parsed].flat()) {
-      if (isPlainObject(item)) {
-        context ??= item["@context"] ?? null;
-        visitNode(item, rootScope, true, 0);
+    try {
+      for (const item of [parsed].flat()) {
+        if (isPlainObject(item)) {
+          context ??= item["@context"] ?? null;
+          visitNode(item, rootScope, true, 0);
+        }
       }
+    } catch (error) {
+      console.error("Failed to read a JSON-LD block", error);
+      truncated = true;
     }
     blocks.push({ context, status: truncated ? "truncated" : "parsed" });
   }
@@ -528,6 +570,10 @@ function extractMicrodata(document, collector) {
    * @type {Map<Element, string>}
    */
   const itemIds = new Map();
+  const budget = {
+    elements: MAX_MICRODATA_ELEMENTS,
+    characters: MAX_MICRODATA_CHARACTERS,
+  };
 
   /**
    * @param {Element} element
@@ -541,7 +587,12 @@ function extractMicrodata(document, collector) {
     if (knownId) {
       return knownId;
     }
-    if (ancestors.has(element) || ancestors.size > MAX_DEPTH) {
+    if (
+      ancestors.has(element) ||
+      ancestors.size > MAX_DEPTH ||
+      budget.elements <= 0 ||
+      budget.characters <= 0
+    ) {
       return null;
     }
     const itemid = element.getAttribute("itemid");
@@ -562,7 +613,10 @@ function extractMicrodata(document, collector) {
     itemIds.set(element, node.id);
 
     const nextAncestors = new Set(ancestors).add(element);
-    for (const property of crawlProperties(element)) {
+    for (const property of crawlProperties(element, budget)) {
+      if (budget.characters <= 0) {
+        break;
+      }
       /** @type {StructuredDataValue} */
       let value;
       if (property.hasAttribute("itemscope")) {
@@ -572,7 +626,12 @@ function extractMicrodata(document, collector) {
         }
         value = { "@id": id };
       } else {
-        value = microdataPropertyValue(property);
+        const maxLength = Math.min(
+          MAX_MICRODATA_VALUE_LENGTH,
+          budget.characters
+        );
+        value = microdataPropertyValue(property, maxLength).slice(0, maxLength);
+        budget.characters -= value.length;
       }
       for (const name of tokens(property.getAttribute("itemprop"))) {
         (node.properties[name] ??= []).push(value);
@@ -601,9 +660,11 @@ function tokens(attribute) {
  * https://html.spec.whatwg.org/multipage/microdata.html#associating-names-with-items
  *
  * @param {Element} root
+ * @param {{ elements: number }} budget - The elements left to visit across all
+ *   items. Visiting stops when it runs out.
  * @returns {Element[]}
  */
-function crawlProperties(root) {
+function crawlProperties(root, budget) {
   const results = [];
   const memory = new Set([root]);
   const pending = [...root.children];
@@ -614,14 +675,17 @@ function crawlProperties(root) {
       pending.push(referenced);
     }
   }
-  while (pending.length) {
+  while (pending.length && budget.elements > 0) {
     const current = pending.pop();
     if (memory.has(current)) {
       continue;
     }
     memory.add(current);
+    budget.elements--;
     if (!current.hasAttribute("itemscope")) {
-      pending.push(...current.children);
+      for (const child of current.children) {
+        pending.push(child);
+      }
     }
     if (tokens(current.getAttribute("itemprop")).length) {
       results.push(current);
@@ -636,9 +700,10 @@ function crawlProperties(root) {
  * See https://html.spec.whatwg.org/multipage/microdata.html#values
  *
  * @param {Element} element
+ * @param {number} maxLength
  * @returns {string}
  */
-function microdataPropertyValue(element) {
+function microdataPropertyValue(element, maxLength) {
   /** @param {string} attribute */
   const url = attribute => {
     const value = element.getAttribute(attribute);
@@ -671,5 +736,25 @@ function microdataPropertyValue(element) {
         return element.getAttribute("datetime");
       }
   }
-  return (element.textContent ?? "").slice(0, MAX_MICRODATA_VALUE_LENGTH);
+  return boundedTextContent(element, maxLength);
+}
+
+/**
+ * The element's textContent, read only as far as needed, since nested
+ * properties would otherwise each read their whole subtree.
+ *
+ * @param {Element} element
+ * @param {number} maxLength
+ * @returns {string}
+ */
+function boundedTextContent(element, maxLength) {
+  const walker = element.ownerDocument.createTreeWalker(
+    element,
+    4 // NodeFilter.SHOW_TEXT
+  );
+  let text = "";
+  while (text.length < maxLength && walker.nextNode()) {
+    text += walker.currentNode.nodeValue;
+  }
+  return text.slice(0, maxLength);
 }

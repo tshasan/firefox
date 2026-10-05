@@ -731,3 +731,113 @@ add_task(async function test_schema_org_vocabulary_classifies_page_types() {
 
   return cleanup();
 });
+
+add_task(async function test_hostile_json_ld_does_not_wipe_other_metadata() {
+  const { html } = await MLTestUtils.serveHTMLInTab({ browser: gBrowser });
+  const manyValues = JSON.stringify({
+    "@type": "Thing",
+    p: new Array(600_000).fill(0),
+  });
+  const depth = 20_000;
+  const deepGraph = '{"@graph":'.repeat(depth) + "{}" + "}".repeat(depth);
+  const deepNest =
+    '{"@context":{"n":"@nest"},"@type":"Thing",' +
+    '"n":{'.repeat(depth) +
+    '"x":1' +
+    "}".repeat(depth) +
+    "}";
+  const { getPageExtractor, cleanup } = await html`
+    <meta name="description" content="Still here." />
+    <script type="application/ld+json">
+      ${deepNest}
+    </script>
+    <script type="application/ld+json">
+      ${deepGraph}
+    </script>
+    <script type="application/ld+json">
+      ${manyValues}
+    </script>
+  `;
+
+  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const { nodes, jsonLdBlocks } = structuredMetadata.structuredData;
+
+  Assert.deepEqual(
+    structuredMetadata.metaTags,
+    [{ source: "html", name: "description", value: "Still here." }],
+    "Meta tags survive hostile JSON-LD."
+  );
+  is(
+    nodes.at(-1).properties.p.length,
+    600_000,
+    "A property with more values than a call can take is read in full."
+  );
+  Assert.deepEqual(
+    jsonLdBlocks.map(block => block.status),
+    ["parsed", "truncated", "parsed"],
+    "Nesting past the depth limit is cut short instead of overflowing."
+  );
+  Assert.deepEqual(
+    nodes.map(node => node.types),
+    [["Thing"], ["Thing"]],
+    "The deeply nested @nest block still yields its node."
+  );
+
+  return cleanup();
+});
+
+add_task(async function test_microdata_itemref_output_is_bounded() {
+  const { html } = await MLTestUtils.serveHTMLInTab({ browser: gBrowser });
+  const items = '<div itemscope itemref="big"></div>'.repeat(300);
+  const text = "x".repeat(1000);
+  const big = `<div id="big">${`<p itemprop="x">${text}</p>`.repeat(300)}</div>`;
+  const { getPageExtractor, cleanup } = await html`
+    <meta name="description" content="Still here." />
+    ${items} ${big}
+  `;
+
+  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const characters = structuredMetadata.structuredData.nodes
+    .flatMap(node => Object.values(node.properties).flat())
+    .reduce((total, value) => total + value.length, 0);
+
+  Assert.lessOrEqual(
+    characters,
+    1_000_000,
+    "Items sharing properties through itemref share one output budget."
+  );
+  Assert.greater(characters, 0, "Items are read up to the budget.");
+  is(structuredMetadata.metaTags.length, 1, "Meta tags are still read.");
+
+  return cleanup();
+});
+
+add_task(async function test_json_ld_value_object_context_and_null_base() {
+  const { html } = await MLTestUtils.serveHTMLInTab({ browser: gBrowser });
+  const { url, getPageExtractor, cleanup } = await html`
+    <script type="application/ld+json">
+      {
+        "@context": { "@base": "https://example.com/" },
+        "@type": "Recipe",
+        "name": { "@context": { "v": "@value" }, "v": "Soup" },
+        "author": { "@context": { "@base": null }, "@id": "ada", "name": "Ada" }
+      }
+    </script>
+  `;
+
+  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const [recipe] = structuredMetadata.structuredData.nodes;
+
+  Assert.deepEqual(
+    recipe.properties.name,
+    [{ "@value": "Soup" }],
+    "Aliases defined on a value object apply to it."
+  );
+  Assert.deepEqual(
+    recipe.properties.author,
+    [{ "@id": new URL("ada", url).href }],
+    "A null @base resets to the document's base."
+  );
+
+  return cleanup();
+});
