@@ -95,6 +95,8 @@ function formatOptions(options) {
  * @typedef {object} PageExtractorPhase
  * @property {string} name - The phase as recorded, e.g. "dom-extract".
  * @property {string} label - The description shown in a profile.
+ * @property {boolean} [profilerOnly] - Records only the profiler marker, for
+ *   a phase too short to tell anything apart in `page_extractor.phase`.
  */
 
 /**
@@ -183,9 +185,10 @@ function bucketToPowerOfTwo(count) {
 
 /**
  * Accumulates data for one PageExtractor instrumentation event. `finish()`
- * always records a `page_extractor.phase` Glean event, and a profiler
- * marker only while profiling; both are keyed by a `TraceId` so parent- and
- * content-process records describe the same request.
+ * records a `page_extractor.phase` Glean event unless the phase is
+ * `profilerOnly`, and a profiler marker only while profiling; both are
+ * keyed by a `TraceId` so parent- and content-process records describe the
+ * same request.
  *
  * `PageExtractorEvent.trace()` is the entry point for the common case of
  * measuring one task from start to finish. The constructor and `finish()`
@@ -227,6 +230,7 @@ export class PageExtractorEvent {
     readerOutputParse: {
       name: "reader-output-parse",
       label: "Process simplified page",
+      profilerOnly: true,
     },
     domExtract: { name: "dom-extract", label: "Scan page content" },
     canvasCapture: { name: "canvas-capture", label: "Capture page images" },
@@ -243,6 +247,7 @@ export class PageExtractorEvent {
   #startTime;
   #options;
   #traceId;
+  #profilerOnly;
   #finished = false;
 
   /**
@@ -282,6 +287,7 @@ export class PageExtractorEvent {
     this.#startTime = ChromeUtils.now();
     this.#innerWindowId = data.innerWindowId;
     this.#options = data.options;
+    this.#profilerOnly = phase.profilerOnly;
     this.#traceId = data.traceId ?? PageExtractorEvent.nextTraceId();
     this.#data = {
       type: "PageExtractor",
@@ -325,22 +331,26 @@ export class PageExtractorEvent {
     this.#finished = true;
     this.addData(data);
 
-    const gleanPayload = {
-      flow_id: this.#traceId.flowId,
-    };
-    for (const [dataKey, gleanKey] of Object.entries(GLEAN_EXTRA_KEYS)) {
-      const value = this.#data[dataKey];
-      gleanPayload[gleanKey] =
-        value !== undefined && GLEAN_BUCKETED_KEYS.has(gleanKey)
-          ? bucketToPowerOfTwo(value)
-          : value;
-    }
-    gleanPayload.duration_ms = Math.round(ChromeUtils.now() - this.#startTime);
+    if (!this.#profilerOnly) {
+      const gleanPayload = {
+        flow_id: this.#traceId.flowId,
+      };
+      for (const [dataKey, gleanKey] of Object.entries(GLEAN_EXTRA_KEYS)) {
+        const value = this.#data[dataKey];
+        gleanPayload[gleanKey] =
+          value !== undefined && GLEAN_BUCKETED_KEYS.has(gleanKey)
+            ? bucketToPowerOfTwo(value)
+            : value;
+      }
+      gleanPayload.duration_ms = Math.round(
+        ChromeUtils.now() - this.#startTime
+      );
 
-    // Recorded before the profiler-active check: Glean is the permanent
-    // record, the profiler marker isn't.
-    Glean.pageExtractor.phase.record(gleanPayload);
-    scheduleSubmission();
+      // Recorded before the profiler-active check: Glean is the permanent
+      // record, the profiler marker isn't.
+      Glean.pageExtractor.phase.record(gleanPayload);
+      scheduleSubmission();
+    }
 
     if (!Services.profiler.IsActive()) {
       return;

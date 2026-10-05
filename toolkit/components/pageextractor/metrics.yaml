@@ -18,8 +18,13 @@ page_extractor:
       phase of every PageExtractor call (headless-extractor, get-text,
       dom-extract, pdf-extract, and so on; see PageExtractorEvent.Phase in
       PageExtractorEvents.sys.mjs), in whichever process it ran, whether or
-      not the profiler is running. Smart Window is one caller among possibly
-      several.
+      not the profiler is running. Phases marked `profilerOnly` there only
+      get the marker. Smart Window is one caller among possibly several.
+
+      A parent-process phase spans the round trip to the content process and
+      everything it waits on there: a parent get-text includes the content
+      wait-for-ready that runs before an unready page is read, which is also
+      recorded on its own.
 
       `flow_id` ties every phase of one call together, and is the same value
       as the `flowId` field on that call's profiler markers. Use it to
@@ -75,7 +80,12 @@ page_extractor:
         type: string
         description: >
           The phase's outcome: "success", "error", or a handled non-error
-          outcome such as "unavailable", "document-hidden", or "empty".
+          outcome such as "unavailable", "document-hidden", "empty",
+          "not-readerable" (reader mode declined the page, so it is read
+          without boilerplate removal), "document-unloaded" (the document
+          was replaced before it was ready), or "browser-closed" (its browser
+          was torn down first, after a failure reported on the phase that
+          caused it).
       error_name:
         type: string
         description: >
