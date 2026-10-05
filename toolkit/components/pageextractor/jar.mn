@@ -6,3 +6,6 @@ toolkit.jar:
   content/global/pageextractor/metadataViewer.html (content/metadataViewer.html)
   content/global/pageextractor/metadataViewer.css (content/metadataViewer.css)
   content/global/pageextractor/metadataViewer.mjs (content/metadataViewer.mjs)
+  content/global/pageextractor/tabUnderstanding.html (content/tabUnderstanding.html)
+  content/global/pageextractor/tabUnderstanding.css (content/tabUnderstanding.css)
+  content/global/pageextractor/tabUnderstanding.mjs (content/tabUnderstanding.mjs)

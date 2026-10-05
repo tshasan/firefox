@@ -1,0 +1,110 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+body {
+  max-width: 72em;
+  margin: 0 auto;
+  padding: var(--space-xlarge);
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-medium);
+}
+
+#status {
+  color: var(--text-color-deemphasized);
+}
+
+.group h2 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-small);
+}
+
+.count {
+  color: var(--text-color-deemphasized);
+  font-weight: var(--font-weight);
+  font-size: var(--font-size-small);
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(18em, 1fr));
+  gap: var(--space-medium);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-small);
+  border: var(--border-width) solid var(--border-color);
+  border-radius: var(--border-radius-medium);
+  padding: var(--space-medium) var(--space-large);
+}
+
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-small);
+  font-weight: var(--font-weight-bold);
+}
+
+.card-title img {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  flex: none;
+}
+
+.card-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.meta {
+  color: var(--text-color-deemphasized);
+  font-size: var(--font-size-small);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-xxsmall) var(--space-medium);
+  margin: 0;
+}
+
+.facts dt {
+  color: var(--text-color-deemphasized);
+}
+
+.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.description {
+  font-size: var(--font-size-small);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-small);
+  margin-top: auto;
+}
+
+.ingredients {
+  margin: 0;
+  padding-inline-start: var(--space-large);
+  font-size: var(--font-size-small);
+}

@@ -1,0 +1,31 @@
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src chrome:; img-src chrome: moz-icon: page-icon: cached-favicon: data: https:; object-src 'none'"
+    />
+    <title>Your tabs</title>
+    <link rel="stylesheet" href="chrome://global/skin/in-content/common.css" />
+    <link
+      rel="stylesheet"
+      href="chrome://global/content/pageextractor/tabUnderstanding.css"
+    />
+    <script
+      type="module"
+      src="chrome://global/content/pageextractor/tabUnderstanding.mjs"
+    ></script>
+  </head>
+  <body>
+    <header>
+      <h1>What your tabs are</h1>
+      <button id="refresh">Read again</button>
+    </header>
+    <p id="status" role="status"></p>
+    <main id="groups"></main>
+  </body>
+</html>
