@@ -2447,7 +2447,7 @@ pref("browser.smartwindow.aitab.viewerURL", "");
 
 // Smart Window: append the metadata a page declares about itself (schema.org,
 // Open Graph, Twitter Card) to get_page_content results. Prototype.
-pref("browser.smartwindow.pageMetadata.enabled", false);
+pref("browser.smartwindow.pageMetadata.enabled", true);
 
 // Smart Window: Auto Tab Grouping (bug 2054500).
 pref("browser.smartwindow.autoTabGrouping.enabled", true);
