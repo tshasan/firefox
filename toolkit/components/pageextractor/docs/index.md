@@ -111,6 +111,12 @@ release. To move to a newer release, run
 `scripts/update_schema_org_vocabulary.py --version <release>` and
 `./mach lint --fix` on the generated `SchemaOrgTypes.sys.mjs`.
 
+To see what real sites declare, run
+`./mach python toolkit/components/pageextractor/scripts/scan_structured_metadata.py`.
+It loads the sites in `scripts/structured_metadata_sites.txt` in the hidden
+browser with a fresh profile, and writes the results and an HTML report to
+`artifacts/structured-metadata-scan/`.
+
 Pages often omit this metadata, get it wrong, or contradict their own content.
 Use it as a hint, and keep your feature working without it.
 
