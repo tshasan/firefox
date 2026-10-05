@@ -5,7 +5,7 @@
 // @ts-check
 
 /**
- * @import { GetTextOptions, CanvasSnapshot, ExtractionResult, PageMetadata, ReaderModeDocument } from './PageExtractor.d.ts'
+ * @import { GetTextOptions, CanvasSnapshot, ExtractionResult, JsonLdNode, PageMetadata, ReaderModeDocument, StructuredMetadata } from './PageExtractor.d.ts'
  * @import { PageExtractorParent } from './PageExtractorParent.sys.mjs'
  * @import { PageExtractorPhase, TraceId } from './PageExtractorEvents.sys.mjs'
  */
@@ -30,6 +30,8 @@ const lazy = XPCOMUtils.declareLazy({
   ReaderMode: "moz-src:///toolkit/components/reader/ReaderMode.sys.mjs",
   extractTextFromDOM:
     "moz-src:///toolkit/components/pageextractor/DOMExtractor.sys.mjs",
+  extractStructuredMetadata:
+    "moz-src:///toolkit/components/pageextractor/StructuredMetadata.sys.mjs",
   shouldExtractYouTube:
     "moz-src:///toolkit/components/pageextractor/YouTubeExtraction.sys.mjs",
   getYouTubeContent:
@@ -212,6 +214,7 @@ export class PageExtractorChild extends JSWindowActorChild {
           language,
           isReaderable: true,
           isGated: false,
+          structuredMetadata: this.#emptyStructuredMetadata(),
         };
         strategy = "about-reader";
       } else {
@@ -237,13 +240,35 @@ export class PageExtractorChild extends JSWindowActorChild {
       );
     }
 
-    const { types: structuredDataTypes, isGated } =
-      this.#extractStructuredData(document);
+    let structuredMetadata;
+    try {
+      structuredMetadata = lazy.extractStructuredMetadata(document);
+    } catch (error) {
+      lazy.console.error("Failed to extract structured metadata", error);
+      structuredMetadata = this.#emptyStructuredMetadata();
+    }
+    const { nodes } = structuredMetadata.jsonLd;
+    const structuredDataTypes = this.#getStructuredDataTypes(nodes);
+    const isGated = this.#isGated(nodes);
     const language = this.#detectLanguage(document);
     const wordCount = this.#getWordCount(language, document.body.innerText);
     const isReaderable = lazy.isProbablyReaderable(document);
 
-    return { structuredDataTypes, wordCount, language, isReaderable, isGated };
+    return {
+      structuredDataTypes,
+      wordCount,
+      language,
+      isReaderable,
+      isGated,
+      structuredMetadata,
+    };
+  }
+
+  /**
+   * @returns {StructuredMetadata}
+   */
+  #emptyStructuredMetadata() {
+    return { metaTags: [], links: [], jsonLd: { nodes: [], blocks: [] } };
   }
 
   /**
@@ -297,71 +322,66 @@ export class PageExtractorChild extends JSWindowActorChild {
   }
 
   /**
-   * This extracts various `@type` values within the JSON-LD structured data markup
-   * of a page, along with whether the page declares its content to be gated.
+   * The `@type` values of the top-level JSON-LD nodes, without the nodes they
+   * embed or link to.
+   *
+   * @param {JsonLdNode[]} nodes
+   * @returns {string[]}
+   */
+  #getStructuredDataTypes(nodes) {
+    const types = new Set();
+    for (const node of nodes) {
+      if (node.isTopLevel) {
+        node.types.forEach(type => types.add(type));
+      }
+    }
+    return Array.from(types);
+  }
+
+  /**
+   * Whether the page declares its content to be gated.
    *
    * Publishers mark gated content with schema.org `isAccessibleForFree: false`,
    * either on the item itself or on the `hasPart` entry describing the gated
    * region. Pages without the markup are reported as not gated.
    *
-   * @param {Document} document
-   * @returns {{ types: string[], isGated: boolean }}
+   * @param {JsonLdNode[]} nodes
+   * @returns {boolean}
    */
-  #extractStructuredData(document) {
-    const scripts = document.querySelectorAll(
-      'script[type="application/ld+json" i]'
-    );
-    const types = new Set();
-    let isGated = false;
-
-    const asArray = value => {
-      if (Array.isArray(value)) {
-        return value;
-      }
-      return value == null ? [] : [value];
-    };
-
-    for (const script of scripts) {
-      const text = script.textContent?.trim();
-      if (!text) {
-        continue;
-      }
-
-      let parsed;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        continue;
-      }
-
-      // JSON-LD can be:
-      // - an object
-      // - an array of objects
-      // - an object with @graph: [...]
-      const topLevelItems = asArray(parsed);
-      const graphItems = topLevelItems.flatMap(x => asArray(x?.["@graph"]));
-      const items = graphItems.length ? graphItems : topLevelItems;
-
-      for (const item of items) {
-        for (const t of asArray(item?.["@type"])) {
-          if (typeof t === "string") {
-            types.add(t);
-          }
-        }
-      }
-
-      // Unlike `@type`, the gating marker is also honored on a wrapper object that
-      // carries an `@graph`, since publishers place it at either level.
-      for (const item of [...topLevelItems, ...graphItems]) {
-        for (const part of [item, ...asArray(item?.hasPart)]) {
-          if (this.#parseSchemaBoolean(part?.isAccessibleForFree) === false) {
-            isGated = true;
-          }
-        }
+  #isGated(nodes) {
+    const gatedIds = new Set();
+    for (const node of nodes) {
+      const isMarkedGated = (node.properties.isAccessibleForFree ?? []).some(
+        value =>
+          this.#parseSchemaBoolean(
+            typeof value == "object" && "@value" in value
+              ? value["@value"]
+              : value
+          ) === false
+      );
+      if (isMarkedGated) {
+        gatedIds.add(node.id);
       }
     }
 
-    return { types: Array.from(types), isGated };
+    for (const node of nodes) {
+      if (!node.isTopLevel) {
+        continue;
+      }
+      if (gatedIds.has(node.id)) {
+        return true;
+      }
+      for (const part of node.properties.hasPart ?? []) {
+        if (
+          typeof part == "object" &&
+          "@id" in part &&
+          gatedIds.has(part["@id"])
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   /**

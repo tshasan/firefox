@@ -78,6 +78,72 @@ export type PageMetadata = {
   // or a registration wall. Derived from the schema.org `isAccessibleForFree`
   // markup, so this is only ever true for pages that annotate themselves.
   isGated: boolean;
+  // The SEO, social and schema.org metadata the page declares about itself.
+  structuredMetadata: StructuredMetadata;
+};
+
+export type MetadataSource = "html" | "opengraph" | "twitter";
+
+export type MetaTagEntry = {
+  source: MetadataSource;
+  // The lowercased name or property, e.g. "description" or "og:description".
+  name: string;
+  value: string;
+};
+
+export type LinkEntry = {
+  rel: string;
+  // Resolved against the document base URL.
+  href: string;
+};
+
+// A JSON-LD value as found in a node property. Nodes are always replaced by an
+// `@id` reference, and value objects keep their type and language.
+export type JsonLdValue =
+  | string
+  | number
+  | boolean
+  | { "@id": string }
+  | {
+      "@value": string | number | boolean;
+      "@type"?: string;
+      "@language"?: string;
+      "@direction"?: string;
+    }
+  | { "@list": JsonLdValue[] };
+
+export type JsonLdNode = {
+  // The `@id` resolved against the document base URL, or a "_:b<n>" blank node
+  // identifier. Several nodes can share an id when a page declares the same
+  // thing more than once.
+  id: string;
+  // The `@type` values as written, e.g. "Recipe" or "schema:Recipe".
+  types: string[];
+  // Every property as written, with its values in document order.
+  properties: Record<string, JsonLdValue[]>;
+  // Whether the node is a top-level object or `@graph` member, rather than
+  // embedded in another node.
+  isTopLevel: boolean;
+  // The index of the JSON-LD script declaring the node.
+  scriptIndex: number;
+};
+
+export type JsonLdBlock = {
+  // The block's `@context`, as written.
+  context: unknown;
+  // "truncated" when nodes were dropped because of the size limits.
+  status: "parsed" | "invalid" | "too-large" | "truncated";
+};
+
+export type StructuredMetadata = {
+  // In document order, with repeated and conflicting values all kept.
+  metaTags: MetaTagEntry[];
+  links: LinkEntry[];
+  jsonLd: {
+    nodes: JsonLdNode[];
+    // One per JSON-LD script, in document order.
+    blocks: JsonLdBlock[];
+  };
 };
 
 /**
