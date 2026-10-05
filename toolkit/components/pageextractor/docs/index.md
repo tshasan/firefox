@@ -103,6 +103,14 @@ describe the same `@id` produce two nodes. Your feature chooses between them.
 The parser has no knowledge of the schema.org vocabulary, so it handles any type
 or property without changes. It does not read RDFa.
 
+To ask what kind of thing a node is, use `SchemaOrgVocabulary.sys.mjs`.
+`isSchemaOrgType(type, "CreativeWork")` is true for a `NewsArticle` or a
+`Recipe`, whether the page writes the type as `NewsArticle`, `schema:Recipe` or
+`https://schema.org/Recipe`. The type hierarchy comes from a pinned schema.org
+release. To move to a newer release, run
+`scripts/update_schema_org_vocabulary.py --version <release>` and
+`./mach lint --fix` on the generated `SchemaOrgTypes.sys.mjs`.
+
 Pages often omit this metadata, get it wrong, or contradict their own content.
 Use it as a hint, and keep your feature working without it.
 

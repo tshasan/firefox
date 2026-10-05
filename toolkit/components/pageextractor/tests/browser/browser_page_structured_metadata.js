@@ -681,3 +681,53 @@ add_task(async function test_microdata_itemref_cycle() {
 
   return cleanup();
 });
+
+add_task(async function test_schema_org_vocabulary_classifies_page_types() {
+  const {
+    getSchemaOrgAncestors,
+    getSchemaOrgTypeName,
+    isSchemaOrgType,
+    SCHEMA_ORG_VERSION,
+  } = ChromeUtils.importESModule(
+    "moz-src:///toolkit/components/pageextractor/SchemaOrgVocabulary.sys.mjs"
+  );
+  const { html } = await MLTestUtils.serveHTMLInTab({ browser: gBrowser });
+  const { getPageExtractor, cleanup } = await html`
+    <script type="application/ld+json">
+      [
+        { "@context": "https://schema.org", "@type": "NewsArticle" },
+        { "@type": "schema:Recipe" },
+        { "@type": "MadeUpType" }
+      ]
+    </script>
+    <div itemscope itemtype="https://schema.org/Hotel"></div>
+  `;
+
+  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const types = structuredMetadata.structuredData.nodes.map(
+    node => node.types[0]
+  );
+
+  Assert.deepEqual(
+    types.map(getSchemaOrgTypeName),
+    ["NewsArticle", "Recipe", null, "Hotel"],
+    "Terms, compact IRIs and IRIs all name schema.org types."
+  );
+  Assert.deepEqual(
+    getSchemaOrgAncestors(types[0]),
+    ["Article", "CreativeWork", "Thing"],
+    "Ancestors are listed nearest first."
+  );
+  Assert.deepEqual(
+    types.map(type => isSchemaOrgType(type, "CreativeWork")),
+    [true, true, false, false],
+    "Subtypes are recognized through the hierarchy."
+  );
+  ok(
+    isSchemaOrgType(types[3], "LocalBusiness"),
+    "Microdata types are recognized too."
+  );
+  is(SCHEMA_ORG_VERSION, "30.1", "The vocabulary version is exposed.");
+
+  return cleanup();
+});
