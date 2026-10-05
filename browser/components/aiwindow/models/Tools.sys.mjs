@@ -51,6 +51,10 @@ ChromeUtils.defineESModuleGetters(lazy, {
   setTimeout: "resource://gre/modules/Timer.sys.mjs",
   MemoriesManager:
     "moz-src:///browser/components/aiwindow/models/memories/MemoriesManager.sys.mjs",
+  PAGE_METADATA_PREF:
+    "moz-src:///browser/components/aiwindow/models/PageMetadataContext.sys.mjs",
+  formatPageMetadataForModel:
+    "moz-src:///browser/components/aiwindow/models/PageMetadataContext.sys.mjs",
   SessionStore:
     "moz-src:///browser/components/sessionstore/SessionStore.sys.mjs",
   SmartWindowNavigationInfo:
@@ -1407,7 +1411,41 @@ export class GetPageContent {
       };
     }
 
-    return { ok: true, content: `Content from ${label}:\n\n${text}` };
+    const metadata = await GetPageContent.#getPageMetadataContext(
+      pageExtractor,
+      signal
+    );
+    return {
+      ok: true,
+      content: `Content from ${label}:\n\n${text}${metadata ? `\n\n${metadata}` : ""}`,
+    };
+  }
+
+  /**
+   * Reads what the page declares about itself, when enabled. A failure leaves
+   * the page content to stand on its own.
+   *
+   * @param {PageExtractorParent} pageExtractor
+   * @param {AbortSignal} [signal]
+   * @returns {Promise<string>}
+   */
+  static async #getPageMetadataContext(pageExtractor, signal) {
+    if (!Services.prefs.getBoolPref(lazy.PAGE_METADATA_PREF, false)) {
+      return "";
+    }
+    try {
+      const { structuredMetadata } = await raceAbort(
+        pageExtractor.getPageMetadata(),
+        signal
+      );
+      return lazy.formatPageMetadataForModel(structuredMetadata);
+    } catch (error) {
+      if (signal?.aborted) {
+        throw error;
+      }
+      lazy.console.warn("Could not read the page metadata", error);
+      return "";
+    }
   }
 }
 

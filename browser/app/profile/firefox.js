@@ -2445,6 +2445,10 @@ pref("browser.smartwindow.aitab.enabled", false);
 // The generate_aitab tool returns a link to this viewer with the page config in the URL hash.
 pref("browser.smartwindow.aitab.viewerURL", "");
 
+// Smart Window: append the metadata a page declares about itself (schema.org,
+// Open Graph, Twitter Card) to get_page_content results. Prototype.
+pref("browser.smartwindow.pageMetadata.enabled", false);
+
 // Smart Window: Auto Tab Grouping (bug 2054500).
 pref("browser.smartwindow.autoTabGrouping.enabled", true);
 pref("browser.smartwindow.autoTabGrouping.preloadModels", true);
