@@ -88,7 +88,11 @@ add_task(async function test_no_metadata() {
 
   Assert.deepEqual(
     structuredMetadata,
-    { metaTags: [], links: [], jsonLd: { nodes: [], blocks: [] } },
+    {
+      metaTags: [],
+      links: [],
+      structuredData: { nodes: [], jsonLdBlocks: [] },
+    },
     "A page without metadata produces empty collections."
   );
 
@@ -130,16 +134,17 @@ add_task(async function test_json_ld_graph_with_references() {
   const orgId = new URL("#org", url).href;
 
   Assert.deepEqual(
-    structuredMetadata.jsonLd,
+    structuredMetadata.structuredData,
     {
-      blocks: [{ context: "https://schema.org", status: "parsed" }],
+      jsonLdBlocks: [{ context: "https://schema.org", status: "parsed" }],
       nodes: [
         {
           id: orgId,
           types: ["Organization"],
           properties: { name: ["Example Co"] },
           isTopLevel: true,
-          scriptIndex: 0,
+          syntax: "json-ld",
+          blockIndex: 0,
         },
         {
           id: "https://example.com/page",
@@ -150,7 +155,8 @@ add_task(async function test_json_ld_graph_with_references() {
             mainEntity: [{ "@id": "_:b0" }],
           },
           isTopLevel: true,
-          scriptIndex: 0,
+          syntax: "json-ld",
+          blockIndex: 0,
         },
         {
           id: "_:b0",
@@ -161,21 +167,24 @@ add_task(async function test_json_ld_graph_with_references() {
             numberOfPlayers: [{ "@id": "_:b2" }],
           },
           isTopLevel: false,
-          scriptIndex: 0,
+          syntax: "json-ld",
+          blockIndex: 0,
         },
         {
           id: "_:b1",
           types: ["Person"],
           properties: { name: ["Ada"] },
           isTopLevel: false,
-          scriptIndex: 0,
+          syntax: "json-ld",
+          blockIndex: 0,
         },
         {
           id: "_:b2",
           types: [],
           properties: { minValue: [1], maxValue: [4] },
           isTopLevel: false,
-          scriptIndex: 0,
+          syntax: "json-ld",
+          blockIndex: 0,
         },
       ],
     },
@@ -212,10 +221,10 @@ add_task(async function test_json_ld_conflicts_are_not_merged() {
   const { structuredMetadata } = await getPageExtractor().getPageMetadata();
 
   Assert.deepEqual(
-    structuredMetadata.jsonLd.nodes.map(node => [
+    structuredMetadata.structuredData.nodes.map(node => [
       node.id,
       node.properties.name,
-      node.scriptIndex,
+      node.blockIndex,
     ]),
     [
       ["https://example.com/p", ["First name"], 0],
@@ -246,7 +255,7 @@ add_task(async function test_json_ld_blank_nodes_are_scoped_per_script() {
   `;
 
   const { structuredMetadata } = await getPageExtractor().getPageMetadata();
-  const [recipe, review] = structuredMetadata.jsonLd.nodes;
+  const [recipe, review] = structuredMetadata.structuredData.nodes;
 
   is(recipe.id, "_:b0", "Labelled blank nodes are relabelled.");
   is(review.id, "_:b1", "Unlabelled nodes get the next blank node.");
@@ -284,7 +293,7 @@ add_task(async function test_json_ld_values() {
   `;
 
   const { structuredMetadata } = await getPageExtractor().getPageMetadata();
-  const [recipe, step] = structuredMetadata.jsonLd.nodes;
+  const [recipe, step] = structuredMetadata.structuredData.nodes;
 
   Assert.deepEqual(
     recipe.properties.name,
@@ -349,7 +358,7 @@ add_task(async function test_json_ld_invalid_blocks_do_not_block_others() {
     await getPageExtractor().getPageMetadata();
 
   Assert.deepEqual(
-    structuredMetadata.jsonLd.blocks,
+    structuredMetadata.structuredData.jsonLdBlocks,
     [
       { context: null, status: "invalid" },
       { context: null, status: "invalid" },
@@ -359,12 +368,14 @@ add_task(async function test_json_ld_invalid_blocks_do_not_block_others() {
     "Each block reports whether it could be read."
   );
   Assert.deepEqual(
-    structuredMetadata.jsonLd.nodes.map(node => node.types),
+    structuredMetadata.structuredData.nodes.map(node => node.types),
     [["Product"]],
     "Valid blocks are read after invalid ones."
   );
   ok(
-    structuredMetadata.jsonLd.blocks.slice(0, 3).every(b => b.context === null),
+    structuredMetadata.structuredData.jsonLdBlocks
+      .slice(0, 3)
+      .every(b => b.context === null),
     "Unreadable blocks have a null context."
   );
   Assert.deepEqual(
@@ -397,12 +408,12 @@ add_task(async function test_json_ld_node_limit() {
   const { structuredMetadata } = await getPageExtractor().getPageMetadata();
 
   is(
-    structuredMetadata.jsonLd.nodes.length,
+    structuredMetadata.structuredData.nodes.length,
     1000,
     "The number of nodes is capped."
   );
   Assert.deepEqual(
-    structuredMetadata.jsonLd.blocks.map(block => block.status),
+    structuredMetadata.structuredData.jsonLdBlocks.map(block => block.status),
     ["truncated", "truncated"],
     "Blocks cut short by the cap are reported."
   );
@@ -426,12 +437,12 @@ add_task(async function test_json_ld_depth_limit() {
   const { structuredMetadata } = await getPageExtractor().getPageMetadata();
 
   is(
-    structuredMetadata.jsonLd.blocks[0].status,
+    structuredMetadata.structuredData.jsonLdBlocks[0].status,
     "truncated",
     "Deeply nested data is cut short instead of failing."
   );
   Assert.less(
-    structuredMetadata.jsonLd.nodes.length,
+    structuredMetadata.structuredData.nodes.length,
     100,
     "Nodes past the depth limit are dropped."
   );
@@ -462,6 +473,211 @@ add_task(async function test_is_gated_follows_has_part_reference() {
   const { isGated } = await getPageExtractor().getPageMetadata();
 
   ok(isGated, "A hasPart linked by @id is followed when checking gating.");
+
+  return cleanup();
+});
+
+add_task(async function test_json_ld_schema_org_keyword_aliases() {
+  const { html } = await MLTestUtils.serveHTMLInTab({ browser: gBrowser });
+  const { getPageExtractor, cleanup } = await html`
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "type": "Recipe",
+        "id": "https://example.com/soup",
+        "name": "Soup"
+      }
+    </script>
+    <script type="application/ld+json">
+      { "type": "Recipe", "name": "Not schema.org" }
+    </script>
+  `;
+
+  const { structuredMetadata, structuredDataTypes } =
+    await getPageExtractor().getPageMetadata();
+  const [soup, other] = structuredMetadata.structuredData.nodes;
+
+  Assert.deepEqual(
+    [soup.id, soup.types, soup.properties],
+    ["https://example.com/soup", ["Recipe"], { name: ["Soup"] }],
+    "The schema.org context's id and type aliases are honored."
+  );
+  Assert.deepEqual(
+    [other.types, Object.keys(other.properties)],
+    [[], ["type", "name"]],
+    "Without the schema.org context, type is an ordinary property."
+  );
+  Assert.deepEqual(
+    structuredDataTypes,
+    ["Recipe"],
+    "Aliased types are reported."
+  );
+
+  return cleanup();
+});
+
+add_task(async function test_json_ld_context_features() {
+  const { html } = await MLTestUtils.serveHTMLInTab({ browser: gBrowser });
+  const { getPageExtractor, cleanup } = await html`
+    <script type="application/ld+json">
+      {
+        "@context": [
+          "https://schema.org",
+          {
+            "@base": "https://example.com/recipes/",
+            "kind": "@type",
+            "labels": "@nest"
+          }
+        ],
+        "@id": "soup",
+        "kind": "Recipe",
+        "labels": { "name": "Soup" },
+        "@reverse": { "hasPart": { "@id": "book" } },
+        "@included": [{ "@id": "chef", "kind": "Person" }],
+        "subjectOf": {
+          "@id": "reviews",
+          "@graph": [{ "kind": "Review", "reviewBody": "Good" }]
+        }
+      }
+    </script>
+  `;
+
+  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+  const base = "https://example.com/recipes/";
+
+  Assert.deepEqual(
+    structuredMetadata.structuredData.nodes,
+    [
+      {
+        id: `${base}soup`,
+        types: ["Recipe"],
+        properties: {
+          name: ["Soup"],
+          subjectOf: [{ "@id": `${base}reviews` }],
+        },
+        isTopLevel: true,
+        syntax: "json-ld",
+        blockIndex: 0,
+      },
+      {
+        id: "_:b0",
+        types: ["Review"],
+        properties: { reviewBody: ["Good"] },
+        isTopLevel: false,
+        syntax: "json-ld",
+        blockIndex: 0,
+      },
+      {
+        id: `${base}book`,
+        types: [],
+        properties: { hasPart: [{ "@id": `${base}soup` }] },
+        isTopLevel: false,
+        syntax: "json-ld",
+        blockIndex: 0,
+      },
+      {
+        id: `${base}chef`,
+        types: ["Person"],
+        properties: {},
+        isTopLevel: true,
+        syntax: "json-ld",
+        blockIndex: 0,
+      },
+    ],
+    "Inline aliases, @base, @nest, embedded graphs, @reverse and @included " +
+      "are all read."
+  );
+
+  return cleanup();
+});
+
+add_task(async function test_microdata() {
+  const { html } = await MLTestUtils.serveHTMLInTab({ browser: gBrowser });
+  const { url, getPageExtractor, cleanup } = await html`
+    <div
+      itemscope
+      itemtype="https://schema.org/Product"
+      itemid="/products/kettle"
+      itemref="extra"
+    >
+      <span itemprop="name">Kettle</span>
+      <img itemprop="image" src="/kettle.jpg" />
+      <div itemprop="offers" itemscope itemtype="https://schema.org/Offer">
+        <meta itemprop="price" content="25.00" />
+        <link itemprop="availability" href="https://schema.org/InStock" />
+      </div>
+      <time itemprop="releaseDate" datetime="2026-01-01">January</time>
+    </div>
+    <p id="extra" itemprop="description category">A kettle</p>
+  `;
+
+  const { structuredMetadata, structuredDataTypes } =
+    await getPageExtractor().getPageMetadata();
+
+  Assert.deepEqual(
+    structuredMetadata.structuredData.nodes,
+    [
+      {
+        id: new URL("/products/kettle", url).href,
+        types: ["https://schema.org/Product"],
+        properties: {
+          name: ["Kettle"],
+          image: [new URL("/kettle.jpg", url).href],
+          offers: [{ "@id": "_:b0" }],
+          releaseDate: ["2026-01-01"],
+          description: ["A kettle"],
+          category: ["A kettle"],
+        },
+        isTopLevel: true,
+        syntax: "microdata",
+        blockIndex: null,
+      },
+      {
+        id: "_:b0",
+        types: ["https://schema.org/Offer"],
+        properties: {
+          price: ["25.00"],
+          availability: ["https://schema.org/InStock"],
+        },
+        isTopLevel: false,
+        syntax: "microdata",
+        blockIndex: null,
+      },
+    ],
+    "Microdata items, nested items and itemref properties become nodes."
+  );
+  Assert.deepEqual(
+    structuredDataTypes,
+    [],
+    "structuredDataTypes still only reports JSON-LD types."
+  );
+
+  return cleanup();
+});
+
+add_task(async function test_microdata_itemref_cycle() {
+  const { html } = await MLTestUtils.serveHTMLInTab({ browser: gBrowser });
+  const { getPageExtractor, cleanup } = await html`
+    <div itemscope>
+      <div id="c" itemprop="first" itemscope itemref="d"></div>
+    </div>
+    <div id="d" itemprop="second" itemscope itemref="c"></div>
+  `;
+
+  const { structuredMetadata } = await getPageExtractor().getPageMetadata();
+
+  Assert.deepEqual(
+    structuredMetadata.structuredData.nodes.map(node => [
+      node.id,
+      node.properties,
+    ]),
+    [
+      ["_:b0", { first: [{ "@id": "_:b1" }] }],
+      ["_:b1", { second: [{ "@id": "_:b2" }] }],
+      ["_:b2", { first: [{ "@id": "_:b1" }] }],
+    ],
+    "Items that refer to each other link back instead of looping."
+  );
 
   return cleanup();
 });

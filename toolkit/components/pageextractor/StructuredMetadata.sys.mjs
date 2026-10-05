@@ -5,7 +5,7 @@
 // @ts-check
 
 /**
- * @import { JsonLdBlock, JsonLdNode, JsonLdValue, LinkEntry, MetaTagEntry, MetadataSource, StructuredMetadata } from './PageExtractor.d.ts'
+ * @import { JsonLdBlock, LinkEntry, MetaTagEntry, MetadataSource, StructuredDataNode, StructuredDataValue, StructuredMetadata } from './PageExtractor.d.ts'
  */
 
 const HTML_META_NAMES = new Set([
@@ -30,10 +30,43 @@ const OPEN_GRAPH_PREFIXES = [
 
 const LINK_RELS = ["canonical"];
 
+const JSON_LD_KEYWORDS = new Set([
+  "@base",
+  "@context",
+  "@direction",
+  "@graph",
+  "@id",
+  "@included",
+  "@index",
+  "@json",
+  "@language",
+  "@list",
+  "@nest",
+  "@reverse",
+  "@set",
+  "@type",
+  "@value",
+  "@vocab",
+]);
+
+/**
+ * Pages reference the schema.org context rather than inline it. Its keyword
+ * aliases are the only part of it that changes how a document is read without
+ * expanding terms. See
+ * https://github.com/schemaorg/schemaorg/blob/main/data/releases/30.1/schemaorgcontext.jsonld
+ */
+const SCHEMA_ORG_CONTEXT_URL =
+  /^https?:\/\/schema\.org(\/(docs\/jsonldcontext\.jsonld?)?)?$/i;
+const SCHEMA_ORG_CONTEXT_ALIASES = [
+  ["id", "@id"],
+  ["type", "@type"],
+];
+
 const MAX_META_TAGS = 500;
 const MAX_JSON_LD_TOTAL_LENGTH = 2_000_000;
-const MAX_JSON_LD_NODES = 1000;
-const MAX_JSON_LD_DEPTH = 32;
+const MAX_NODES = 1000;
+const MAX_DEPTH = 32;
+const MAX_MICRODATA_VALUE_LENGTH = 10_000;
 
 /**
  * Collects the SEO, social and schema.org metadata a page declares about
@@ -45,10 +78,13 @@ const MAX_JSON_LD_DEPTH = 32;
  * @returns {StructuredMetadata}
  */
 export function extractStructuredMetadata(document) {
+  const collector = new NodeCollector();
+  const jsonLdBlocks = extractJsonLd(document, collector);
+  extractMicrodata(document, collector);
   return {
     metaTags: extractMetaTags(document),
     links: extractLinks(document),
-    jsonLd: extractJsonLd(document),
+    structuredData: { nodes: collector.nodes, jsonLdBlocks },
   };
 }
 
@@ -119,30 +155,140 @@ function extractLinks(document) {
 }
 
 /**
- * Flattens the JSON-LD blocks of a document into a list of nodes, following
- * the shape of the JSON-LD 1.1 flattening algorithm: every node object becomes
- * a node, and where it was embedded a `{ "@id" }` reference is left instead.
- * Unlike that algorithm, nodes sharing an `@id` are not merged, so conflicting
- * declarations stay apart, and terms are not expanded against `@context`, as
- * that would require fetching remote contexts. Callers can read the block's
- * `@context` to interpret them.
+ * The nodes collected from every syntax. They share one size limit and one
+ * blank node numbering, so ids never collide across syntaxes.
+ */
+class NodeCollector {
+  /** @type {StructuredDataNode[]} */
+  nodes = [];
+
+  #blankNodeCount = 0;
+
+  newBlankNodeId() {
+    return `_:b${this.#blankNodeCount++}`;
+  }
+
+  /**
+   * @param {StructuredDataNode} node
+   * @returns {boolean} false when the node was dropped by the size limit.
+   */
+  add(node) {
+    if (this.nodes.length >= MAX_NODES) {
+      return false;
+    }
+    this.nodes.push(node);
+    return true;
+  }
+}
+
+/**
+ * @typedef {object} JsonLdScope
+ * @property {Map<string, string>} aliases - Terms the active context maps to a
+ *   keyword.
+ * @property {string} base - The base URL `@id` values resolve against.
+ */
+
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, any>}
+ */
+function isPlainObject(value) {
+  return !!value && typeof value == "object" && !Array.isArray(value);
+}
+
+/**
+ * Applies a local `@context` to the active scope. Only what changes how keys
+ * are read is kept: keyword aliases and `@base`. Other term definitions are
+ * ignored, since expanding terms would require fetching remote contexts.
+ *
+ * @param {JsonLdScope} scope
+ * @param {unknown} context
+ * @param {string} documentBase
+ * @returns {JsonLdScope}
+ */
+function applyContext(scope, context, documentBase) {
+  let { aliases, base } = scope;
+  for (const item of [context].flat()) {
+    if (item === null) {
+      aliases = new Map();
+      base = documentBase;
+    } else if (typeof item == "string") {
+      if (SCHEMA_ORG_CONTEXT_URL.test(item)) {
+        aliases = new Map([...aliases, ...SCHEMA_ORG_CONTEXT_ALIASES]);
+      }
+    } else if (isPlainObject(item)) {
+      aliases = new Map(aliases);
+      for (const [term, definition] of Object.entries(item)) {
+        if (term == "@base") {
+          if (typeof definition == "string") {
+            base = URL.parse(definition, base)?.href ?? base;
+          }
+          continue;
+        }
+        const target = isPlainObject(definition)
+          ? definition["@id"]
+          : definition;
+        if (typeof target == "string" && JSON_LD_KEYWORDS.has(target)) {
+          aliases.set(term, target);
+        } else {
+          aliases.delete(term);
+        }
+      }
+    }
+  }
+  return { aliases, base };
+}
+
+/**
+ * Splits an object's entries into keywords, resolving aliases, and properties.
+ * The properties of `@nest` objects are lifted into the object.
+ *
+ * @param {Record<string, any>} object
+ * @param {JsonLdScope} scope
+ * @returns {{ keywords: Map<string, any>, properties: [string, any][] }}
+ */
+function readEntries(object, scope) {
+  const keywords = new Map();
+  /** @type {[string, any][]} */
+  const properties = [];
+  for (const [key, value] of Object.entries(object)) {
+    const keyword = key.startsWith("@") ? key : scope.aliases.get(key);
+    if (!keyword) {
+      properties.push([key, value]);
+    } else if (keyword == "@nest") {
+      for (const nested of [value].flat().filter(isPlainObject)) {
+        properties.push(...readEntries(nested, scope).properties);
+      }
+    } else {
+      keywords.set(keyword, value);
+    }
+  }
+  return { keywords, properties };
+}
+
+/**
+ * Flattens the JSON-LD blocks of a document into nodes, following the shape of
+ * the JSON-LD 1.1 flattening algorithm: every node object becomes a node, and
+ * where it was embedded a `{ "@id" }` reference is left instead. Unlike that
+ * algorithm, nodes sharing an `@id` are not merged, so conflicting
+ * declarations stay apart, and terms are kept as written rather than expanded
+ * against `@context`. Callers can read the block's `@context` to interpret
+ * them.
  *
  * @param {Document} document
- * @returns {{ nodes: JsonLdNode[], blocks: JsonLdBlock[] }}
+ * @param {NodeCollector} collector
+ * @returns {JsonLdBlock[]}
  */
-function extractJsonLd(document) {
-  /** @type {JsonLdNode[]} */
-  const nodes = [];
+function extractJsonLd(document, collector) {
   /** @type {JsonLdBlock[]} */
   const blocks = [];
-  let blankNodeCount = 0;
+  const documentBase = document.baseURI;
   let remainingLength = MAX_JSON_LD_TOTAL_LENGTH;
-  const baseURI = document.baseURI;
   const scripts = document.querySelectorAll(
     'script[type="application/ld+json" i]'
   );
 
-  for (const [scriptIndex, script] of scripts.entries()) {
+  for (const [blockIndex, script] of scripts.entries()) {
     const text = script.textContent ?? "";
     if (text.length > remainingLength) {
       blocks.push({ context: null, status: "too-large" });
@@ -164,103 +310,169 @@ function extractJsonLd(document) {
 
     /**
      * @param {unknown} id
+     * @param {JsonLdScope} scope
      * @returns {string}
      */
-    const nodeId = id => {
+    const nodeId = (id, scope) => {
       if (typeof id != "string") {
-        return `_:b${blankNodeCount++}`;
+        return collector.newBlankNodeId();
       }
       // Blank node labels only identify a node within one JSON-LD document.
       if (id.startsWith("_:")) {
         let label = blankNodeLabels.get(id);
         if (!label) {
-          label = `_:b${blankNodeCount++}`;
+          label = collector.newBlankNodeId();
           blankNodeLabels.set(id, label);
         }
         return label;
       }
-      return URL.parse(id, baseURI)?.href ?? id;
+      return URL.parse(id, scope.base)?.href ?? id;
     };
 
     /**
-     * Adds the node and the nodes embedded in it.
+     * @param {StructuredDataNode} node
+     * @returns {boolean}
+     */
+    const addNode = node => {
+      if (!collector.add(node)) {
+        truncated = true;
+        return false;
+      }
+      return true;
+    };
+
+    /**
+     * Adds the node, the nodes embedded in it, and the members of its graph.
      *
      * @param {Record<string, any>} object
+     * @param {JsonLdScope} scope
      * @param {boolean} isTopLevel
      * @param {number} depth
-     * @returns {JsonLdValue | null} A reference to the node.
+     * @returns {StructuredDataValue | null} A reference to the node.
      */
-    const addNode = (object, isTopLevel, depth) => {
-      const keys = Object.keys(object).filter(key => key != "@context");
-      if (keys.length == 1 && keys[0] == "@id") {
-        return { "@id": nodeId(object["@id"]) };
+    const visitNode = (object, scope, isTopLevel, depth) => {
+      if ("@context" in object) {
+        scope = applyContext(scope, object["@context"], documentBase);
       }
-      if (nodes.length >= MAX_JSON_LD_NODES) {
-        truncated = true;
-        return null;
-      }
-      /** @type {JsonLdNode} */
-      const node = {
-        id: nodeId(object["@id"]),
-        types: [object["@type"]].flat().filter(t => typeof t == "string"),
-        properties: Object.create(null),
-        isTopLevel,
-        scriptIndex,
-      };
-      nodes.push(node);
-      for (const key of keys) {
-        if (key.startsWith("@")) {
-          continue;
+      const { keywords, properties } = readEntries(object, scope);
+      const types = [keywords.get("@type")]
+        .flat()
+        .filter(t => typeof t == "string");
+      const reverse = keywords.get("@reverse");
+
+      /** @type {StructuredDataValue | null} */
+      let reference = keywords.has("@id")
+        ? { "@id": nodeId(keywords.get("@id"), scope) }
+        : null;
+
+      if (types.length || properties.length || isPlainObject(reverse)) {
+        /** @type {StructuredDataNode} */
+        const node = {
+          id: reference?.["@id"] ?? collector.newBlankNodeId(),
+          types,
+          properties: Object.create(null),
+          isTopLevel,
+          syntax: "json-ld",
+          blockIndex,
+        };
+        if (!addNode(node)) {
+          return null;
         }
-        const values = toValues(object[key], depth + 1);
-        if (values.length) {
-          node.properties[key] = values;
+        reference = { "@id": node.id };
+        for (const [key, value] of properties) {
+          const values = toValues(value, scope, depth + 1);
+          if (values.length) {
+            (node.properties[key] ??= []).push(...values);
+          }
+        }
+        if (isPlainObject(reverse)) {
+          addReverseNodes(node.id, reverse, scope, depth + 1);
         }
       }
-      return { "@id": node.id };
+
+      for (const keyword of ["@graph", "@included"]) {
+        for (const member of [keywords.get(keyword) ?? []].flat()) {
+          if (isPlainObject(member)) {
+            visitNode(member, scope, isTopLevel, depth + 1);
+          }
+        }
+      }
+      return reference;
+    };
+
+    /**
+     * A reverse property states a property of other nodes that points back at
+     * this one. Since nodes are not merged, each statement becomes a node of
+     * its own that holds only that property.
+     *
+     * @param {string} id
+     * @param {Record<string, any>} reverse
+     * @param {JsonLdScope} scope
+     * @param {number} depth
+     */
+    const addReverseNodes = (id, reverse, scope, depth) => {
+      for (const [key, value] of readEntries(reverse, scope).properties) {
+        for (const subject of toValues(value, scope, depth + 1)) {
+          if (isPlainObject(subject) && "@id" in subject) {
+            addNode({
+              id: subject["@id"],
+              types: [],
+              properties: Object.assign(Object.create(null), {
+                [key]: [{ "@id": id }],
+              }),
+              isTopLevel: false,
+              syntax: "json-ld",
+              blockIndex,
+            });
+          }
+        }
+      }
     };
 
     /**
      * @param {unknown} value
+     * @param {JsonLdScope} scope
      * @param {number} depth
-     * @returns {JsonLdValue[]}
+     * @returns {StructuredDataValue[]}
      */
-    const toValues = (value, depth) => {
+    const toValues = (value, scope, depth) => {
       if (value === null || value === undefined) {
         return [];
       }
       if (typeof value != "object") {
         return [/** @type {string | number | boolean} */ (value)];
       }
-      if (depth > MAX_JSON_LD_DEPTH) {
+      if (depth > MAX_DEPTH) {
         truncated = true;
         return [];
       }
       if (Array.isArray(value)) {
-        return value.flatMap(item => toValues(item, depth + 1));
+        return value.flatMap(item => toValues(item, scope, depth + 1));
       }
-      const object = /** @type {Record<string, any>} */ (value);
-      if ("@value" in object) {
-        const literal = object["@value"];
+      const { keywords } = readEntries(value, scope);
+      if (keywords.has("@value")) {
+        const literal = keywords.get("@value");
         if (literal === null || typeof literal == "object") {
           return [];
         }
-        /** @type {JsonLdValue} */
+        /** @type {StructuredDataValue} */
         const valueObject = { "@value": literal };
         for (const key of ["@type", "@language", "@direction"]) {
-          if (typeof object[key] == "string") {
-            valueObject[key] = object[key];
+          if (typeof keywords.get(key) == "string") {
+            valueObject[key] = keywords.get(key);
           }
         }
         return [valueObject];
       }
-      if ("@list" in object) {
-        return [{ "@list": toListValues(object["@list"], depth + 1) }];
+      if (keywords.has("@list")) {
+        return [
+          { "@list": toListValues(keywords.get("@list"), scope, depth + 1) },
+        ];
       }
-      if ("@set" in object) {
-        return toValues(object["@set"], depth + 1);
+      if (keywords.has("@set")) {
+        return toValues(keywords.get("@set"), scope, depth + 1);
       }
-      const reference = addNode(object, false, depth);
+      const reference = visitNode(value, scope, false, depth);
       return reference ? [reference] : [];
     };
 
@@ -268,11 +480,12 @@ function extractJsonLd(document) {
      * Unlike other arrays, an array inside a list is a list of its own.
      *
      * @param {unknown} value
+     * @param {JsonLdScope} scope
      * @param {number} depth
-     * @returns {JsonLdValue[]}
+     * @returns {StructuredDataValue[]}
      */
-    const toListValues = (value, depth) => {
-      if (depth > MAX_JSON_LD_DEPTH) {
+    const toListValues = (value, scope, depth) => {
+      if (depth > MAX_DEPTH) {
         truncated = true;
         return [];
       }
@@ -280,29 +493,183 @@ function extractJsonLd(document) {
         .flat()
         .flatMap(item =>
           Array.isArray(item)
-            ? [{ "@list": toListValues(item, depth + 1) }]
-            : toValues(item, depth + 1)
+            ? [{ "@list": toListValues(item, scope, depth + 1) }]
+            : toValues(item, scope, depth + 1)
         );
     };
 
+    /** @type {JsonLdScope} */
+    const rootScope = { aliases: new Map(), base: documentBase };
     let context = null;
     for (const item of [parsed].flat()) {
-      if (!item || typeof item != "object" || Array.isArray(item)) {
-        continue;
-      }
-      context ??= item["@context"] ?? null;
-      const { "@graph": graph, ...rest } = item;
-      if (graph === undefined || Object.keys(rest).some(k => k != "@context")) {
-        addNode(graph === undefined ? item : rest, true, 0);
-      }
-      for (const member of [graph ?? []].flat()) {
-        if (member && typeof member == "object" && !Array.isArray(member)) {
-          addNode(member, true, 1);
-        }
+      if (isPlainObject(item)) {
+        context ??= item["@context"] ?? null;
+        visitNode(item, rootScope, true, 0);
       }
     }
     blocks.push({ context, status: truncated ? "truncated" : "parsed" });
   }
 
-  return { nodes, blocks };
+  return blocks;
+}
+
+/**
+ * Collects HTML microdata items into nodes, following the WHATWG microdata
+ * model: https://html.spec.whatwg.org/multipage/microdata.html
+ *
+ * @param {Document} document
+ * @param {NodeCollector} collector
+ */
+function extractMicrodata(document, collector) {
+  /**
+   * Through `itemref`, one item can be the value of several properties. It is
+   * collected once.
+   *
+   * @type {Map<Element, string>}
+   */
+  const itemIds = new Map();
+
+  /**
+   * @param {Element} element
+   * @param {boolean} isTopLevel
+   * @param {Set<Element>} ancestors - The items being collected, to stop
+   *   cycles.
+   * @returns {string | null} The id of the item's node.
+   */
+  const visitItem = (element, isTopLevel, ancestors) => {
+    const knownId = itemIds.get(element);
+    if (knownId) {
+      return knownId;
+    }
+    if (ancestors.has(element) || ancestors.size > MAX_DEPTH) {
+      return null;
+    }
+    const itemid = element.getAttribute("itemid");
+    /** @type {StructuredDataNode} */
+    const node = {
+      id:
+        (itemid && URL.parse(itemid, element.baseURI)?.href) ||
+        collector.newBlankNodeId(),
+      types: tokens(element.getAttribute("itemtype")),
+      properties: Object.create(null),
+      isTopLevel,
+      syntax: "microdata",
+      blockIndex: null,
+    };
+    if (!collector.add(node)) {
+      return null;
+    }
+    itemIds.set(element, node.id);
+
+    const nextAncestors = new Set(ancestors).add(element);
+    for (const property of crawlProperties(element)) {
+      /** @type {StructuredDataValue} */
+      let value;
+      if (property.hasAttribute("itemscope")) {
+        const id = visitItem(property, false, nextAncestors);
+        if (!id) {
+          continue;
+        }
+        value = { "@id": id };
+      } else {
+        value = microdataPropertyValue(property);
+      }
+      for (const name of tokens(property.getAttribute("itemprop"))) {
+        (node.properties[name] ??= []).push(value);
+      }
+    }
+    return node.id;
+  };
+
+  for (const element of document.querySelectorAll(
+    "[itemscope]:not([itemprop])"
+  )) {
+    visitItem(element, true, new Set());
+  }
+}
+
+/**
+ * @param {string | null} attribute
+ * @returns {string[]} The unique space-separated tokens, in order.
+ */
+function tokens(attribute) {
+  return [...new Set(attribute?.split(/[\t\n\f\r ]+/).filter(Boolean))];
+}
+
+/**
+ * The elements holding an item's properties, in tree order. See
+ * https://html.spec.whatwg.org/multipage/microdata.html#associating-names-with-items
+ *
+ * @param {Element} root
+ * @returns {Element[]}
+ */
+function crawlProperties(root) {
+  const results = [];
+  const memory = new Set([root]);
+  const pending = [...root.children];
+  const rootNode = /** @type {Document | ShadowRoot} */ (root.getRootNode());
+  for (const id of tokens(root.getAttribute("itemref"))) {
+    const referenced = rootNode.getElementById?.(id);
+    if (referenced) {
+      pending.push(referenced);
+    }
+  }
+  while (pending.length) {
+    const current = pending.pop();
+    if (memory.has(current)) {
+      continue;
+    }
+    memory.add(current);
+    if (!current.hasAttribute("itemscope")) {
+      pending.push(...current.children);
+    }
+    if (tokens(current.getAttribute("itemprop")).length) {
+      results.push(current);
+    }
+  }
+  return results.sort((a, b) =>
+    a.compareDocumentPosition(b) & a.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+  );
+}
+
+/**
+ * See https://html.spec.whatwg.org/multipage/microdata.html#values
+ *
+ * @param {Element} element
+ * @returns {string}
+ */
+function microdataPropertyValue(element) {
+  /** @param {string} attribute */
+  const url = attribute => {
+    const value = element.getAttribute(attribute);
+    return value === null
+      ? ""
+      : (URL.parse(value, element.baseURI)?.href ?? "");
+  };
+  switch (element.localName) {
+    case "meta":
+      return element.getAttribute("content") ?? "";
+    case "audio":
+    case "embed":
+    case "iframe":
+    case "img":
+    case "source":
+    case "track":
+    case "video":
+      return url("src");
+    case "a":
+    case "area":
+    case "link":
+      return url("href");
+    case "object":
+      return url("data");
+    case "data":
+    case "meter":
+      return element.getAttribute("value") ?? "";
+    case "time":
+      if (element.hasAttribute("datetime")) {
+        return element.getAttribute("datetime");
+      }
+  }
+  return (element.textContent ?? "").slice(0, MAX_MICRODATA_VALUE_LENGTH);
 }

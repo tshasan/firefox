@@ -5,7 +5,7 @@
 // @ts-check
 
 /**
- * @import { GetTextOptions, CanvasSnapshot, ExtractionResult, JsonLdNode, PageMetadata, ReaderModeDocument, StructuredMetadata } from './PageExtractor.d.ts'
+ * @import { GetTextOptions, CanvasSnapshot, ExtractionResult, PageMetadata, ReaderModeDocument, StructuredDataNode, StructuredMetadata } from './PageExtractor.d.ts'
  * @import { PageExtractorParent } from './PageExtractorParent.sys.mjs'
  * @import { PageExtractorPhase, TraceId } from './PageExtractorEvents.sys.mjs'
  */
@@ -247,7 +247,11 @@ export class PageExtractorChild extends JSWindowActorChild {
       lazy.console.error("Failed to extract structured metadata", error);
       structuredMetadata = this.#emptyStructuredMetadata();
     }
-    const { nodes } = structuredMetadata.jsonLd;
+    // These rules predate microdata support, and consumers compare the types
+    // as JSON-LD writes them.
+    const nodes = structuredMetadata.structuredData.nodes.filter(
+      node => node.syntax == "json-ld"
+    );
     const structuredDataTypes = this.#getStructuredDataTypes(nodes);
     const isGated = this.#isGated(nodes);
     const language = this.#detectLanguage(document);
@@ -268,7 +272,11 @@ export class PageExtractorChild extends JSWindowActorChild {
    * @returns {StructuredMetadata}
    */
   #emptyStructuredMetadata() {
-    return { metaTags: [], links: [], jsonLd: { nodes: [], blocks: [] } };
+    return {
+      metaTags: [],
+      links: [],
+      structuredData: { nodes: [], jsonLdBlocks: [] },
+    };
   }
 
   /**
@@ -325,7 +333,7 @@ export class PageExtractorChild extends JSWindowActorChild {
    * The `@type` values of the top-level JSON-LD nodes, without the nodes they
    * embed or link to.
    *
-   * @param {JsonLdNode[]} nodes
+   * @param {StructuredDataNode[]} nodes
    * @returns {string[]}
    */
   #getStructuredDataTypes(nodes) {
@@ -345,7 +353,7 @@ export class PageExtractorChild extends JSWindowActorChild {
    * either on the item itself or on the `hasPart` entry describing the gated
    * region. Pages without the markup are reported as not gated.
    *
-   * @param {JsonLdNode[]} nodes
+   * @param {StructuredDataNode[]} nodes
    * @returns {boolean}
    */
   #isGated(nodes) {

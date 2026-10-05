@@ -97,9 +97,9 @@ export type LinkEntry = {
   href: string;
 };
 
-// A JSON-LD value as found in a node property. Nodes are always replaced by an
-// `@id` reference, and value objects keep their type and language.
-export type JsonLdValue =
+// A property value. Nodes are always replaced by an `@id` reference, and
+// JSON-LD value objects keep their type, language and direction.
+export type StructuredDataValue =
   | string
   | number
   | boolean
@@ -110,22 +110,24 @@ export type JsonLdValue =
       "@language"?: string;
       "@direction"?: string;
     }
-  | { "@list": JsonLdValue[] };
+  | { "@list": StructuredDataValue[] };
 
-export type JsonLdNode = {
-  // The `@id` resolved against the document base URL, or a "_:b<n>" blank node
-  // identifier. Several nodes can share an id when a page declares the same
-  // thing more than once.
+export type StructuredDataNode = {
+  // The `@id` or `itemid` resolved against the document base URL, or a
+  // "_:b<n>" blank node identifier. Several nodes can share an id when a page
+  // declares the same thing more than once.
   id: string;
-  // The `@type` values as written, e.g. "Recipe" or "schema:Recipe".
+  // The types as written, e.g. "Recipe" or "schema:Recipe" in JSON-LD, and
+  // "https://schema.org/Recipe" in microdata.
   types: string[];
   // Every property as written, with its values in document order.
-  properties: Record<string, JsonLdValue[]>;
-  // Whether the node is a top-level object or `@graph` member, rather than
-  // embedded in another node.
+  properties: Record<string, StructuredDataValue[]>;
+  // Whether the node is a top-level JSON-LD object or `@graph` member, or a
+  // top-level microdata item, rather than embedded in another node.
   isTopLevel: boolean;
-  // The index of the JSON-LD script declaring the node.
-  scriptIndex: number;
+  syntax: "json-ld" | "microdata";
+  // The index of the JSON-LD block declaring the node, null for microdata.
+  blockIndex: number | null;
 };
 
 export type JsonLdBlock = {
@@ -139,10 +141,11 @@ export type StructuredMetadata = {
   // In document order, with repeated and conflicting values all kept.
   metaTags: MetaTagEntry[];
   links: LinkEntry[];
-  jsonLd: {
-    nodes: JsonLdNode[];
+  structuredData: {
+    // JSON-LD nodes in document order, followed by microdata items.
+    nodes: StructuredDataNode[];
     // One per JSON-LD script, in document order.
-    blocks: JsonLdBlock[];
+    jsonLdBlocks: JsonLdBlock[];
   };
 };
 

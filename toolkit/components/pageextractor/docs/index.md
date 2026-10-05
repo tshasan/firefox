@@ -92,15 +92,16 @@ about itself, kept apart from the extracted text:
 - `metaTags`: description, keywords, author and robots `<meta>` tags, Open Graph
   tags, and Twitter Card tags, each with its source vocabulary.
 - `links`: canonical links.
-- `jsonLd`: every node from the page's JSON-LD blocks, with its types and all of
-  its properties. The parser replaces embedded objects and `@id` links with
+- `structuredData`: every node from the page's JSON-LD blocks and microdata
+  items, with its types, all of its properties, and the syntax it came from.
+  The parser replaces embedded objects, nested items and `@id` links with
   `{ "@id" }` references to other nodes.
 
 The parser keeps every value, including repeats and conflicts. An HTML
 description and an Open Graph description stay separate, and two blocks that
 describe the same `@id` produce two nodes. Your feature chooses between them.
 The parser has no knowledge of the schema.org vocabulary, so it handles any type
-or property without changes. It does not read Microdata or RDFa yet.
+or property without changes. It does not read RDFa.
 
 Pages often omit this metadata, get it wrong, or contradict their own content.
 Use it as a hint, and keep your feature working without it.
