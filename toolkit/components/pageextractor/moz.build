@@ -6,6 +6,8 @@ SPHINX_TREES["/toolkit/components/pageextractor"] = "docs"
 
 BROWSER_CHROME_MANIFESTS += ["tests/browser/browser.toml"]
 
+JAR_MANIFESTS += ["jar.mn"]
+
 FINAL_TARGET_FILES.actors += [
     "PageExtractorChild.sys.mjs",
     "PageExtractorParent.sys.mjs",

@@ -1,0 +1,86 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+body {
+  max-width: 60em;
+  margin: 0 auto;
+  padding: var(--space-xlarge);
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-medium);
+}
+
+header h1 {
+  flex: 1 0 100%;
+}
+
+.lineage {
+  color: var(--text-color-deemphasized);
+}
+
+.declared-type {
+  font-size: var(--font-size-xlarge);
+  font-weight: var(--font-weight-bold);
+}
+
+.card {
+  border: var(--border-width) solid var(--border-color);
+  border-radius: var(--border-radius-medium);
+  padding: var(--space-medium) var(--space-large);
+  margin-block: var(--space-medium);
+}
+
+.card:target {
+  outline: 2px solid var(--focus-outline-color);
+}
+
+.card-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-small) var(--space-medium);
+}
+
+.badge {
+  border-radius: var(--border-radius-small);
+  padding: 0 var(--space-xsmall);
+  background: var(--background-color-canvas);
+  border: var(--border-width) solid var(--border-color);
+  font-size: var(--font-size-small);
+}
+
+.badge.conflict {
+  margin-inline-start: var(--space-small);
+  border-color: var(--text-color-warning, currentColor);
+  font-weight: var(--font-weight-bold);
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  text-align: start;
+  vertical-align: top;
+  padding: var(--space-xsmall) var(--space-small);
+  border-bottom: var(--border-width) solid var(--border-color);
+  overflow-wrap: anywhere;
+}
+
+th {
+  width: 25%;
+  font-weight: var(--font-weight-bold);
+}
+
+.id {
+  font-family: monospace;
+  font-size: var(--font-size-small);
+  color: var(--text-color-deemphasized);
+}

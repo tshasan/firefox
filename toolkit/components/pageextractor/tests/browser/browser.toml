@@ -22,6 +22,8 @@ support-files = [
 
 ["browser_headless_extractor.js"]
 
+["browser_metadata_viewer.js"]
+
 ["browser_page_extractor_marker_colors.js"]
 
 ["browser_page_extractor_markers.js"]
