@@ -996,6 +996,9 @@ export class PageExtractorParent extends JSWindowActorParent {
             // message manager group.
             messageManagerGroup: "headless-browsers",
             userContextId,
+            windowToMatch: Services.wm.getMostRecentBrowserWindow({
+              allowPopups: false,
+            }),
           }
         );
         read.catch(error =>

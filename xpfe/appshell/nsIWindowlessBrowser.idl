@@ -37,4 +37,11 @@ interface nsIWindowlessBrowser : nsIWebNavigation
    * that owns the docshell used for navigation.
    */
   readonly attribute BrowsingContext browsingContext;
+
+  /**
+   * Gives the browser a place on screen, in device pixels, as if it were an
+   * OS window there. Content in it then reports this as its window's screen
+   * position and outer size, instead of a window of size 0 at 0,0.
+   */
+  void setScreenRect(in long aX, in long aY, in long aWidth, in long aHeight);
 };

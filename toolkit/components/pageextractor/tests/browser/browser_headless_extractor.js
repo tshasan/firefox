@@ -48,6 +48,104 @@ add_task(async function test_headless_extraction() {
 });
 
 /**
+ * A page read in the hidden browser sees the size and screen position of the
+ * window the user browses in, not a window of size 0 at 0,0, while other
+ * hidden browsers keep their own geometry.
+ */
+add_task(async function test_headless_window_metrics() {
+  const { PageExtractorParent } = ChromeUtils.importESModule(
+    "resource://gre/actors/PageExtractorParent.sys.mjs"
+  );
+  const { HiddenBrowserManager } = ChromeUtils.importESModule(
+    "resource://gre/modules/HiddenFrame.sys.mjs"
+  );
+  const { html } = MLTestUtils.serveHTML();
+  const { url, cleanup } = html`<!DOCTYPE html>
+    <html>
+      <head>
+        <script>
+          document.documentElement.dataset.loadMetrics = JSON.stringify({
+            outerWidth,
+            outerHeight,
+            screenX,
+            screenY,
+            innerWidth,
+            innerHeight,
+          });
+        </script>
+      </head>
+      <body>
+        Window metrics
+      </body>
+    </html>`;
+
+  const { screenX: originalX, screenY: originalY } = window;
+  window.moveTo(screen.availLeft + 50, screen.availTop + 40);
+  await TestUtils.waitForCondition(
+    () => window.screenX != 0 && window.screenY != 0,
+    "The window moves away from the screen's origin"
+  );
+
+  try {
+    // A default hidden browser open beside the matched one keeps its own
+    // geometry.
+    const metrics = await HiddenBrowserManager.withHiddenBrowser(
+      async browser => {
+        const matchedMetrics = await PageExtractorParent.getHeadlessExtractor({
+          urlString: url,
+          callback: actor =>
+            SpecialPowers.spawn(actor.browsingContext, [], () =>
+              JSON.parse(content.document.documentElement.dataset.loadMetrics)
+            ),
+        });
+        browser.loadURI(Services.io.newURI("about:blank"), {
+          triggeringPrincipal:
+            Services.scriptSecurityManager.getSystemPrincipal(),
+        });
+        await TestUtils.waitForCondition(
+          () =>
+            browser.browsingContext.currentWindowGlobal?.documentURI.spec ==
+            "about:blank",
+          "The default hidden browser loads about:blank"
+        );
+        await SpecialPowers.spawn(browser, [], () => {
+          is(content.outerWidth, 0, "Default outer width stays zero");
+          is(content.outerHeight, 0, "Default outer height stays zero");
+          is(content.screenX, 0, "Default screen X stays zero");
+          is(content.screenY, 0, "Default screen Y stays zero");
+          is(content.innerWidth, 1024, "Default inner width stays 1024");
+          is(content.innerHeight, 768, "Default inner height stays 768");
+        });
+        return matchedMetrics;
+      },
+      { messageManagerGroup: "headless-browsers" }
+    );
+
+    for (const property of [
+      "outerWidth",
+      "outerHeight",
+      "screenX",
+      "screenY",
+    ]) {
+      is(metrics[property], window[property], `${property} matches the window`);
+    }
+    is(
+      metrics.innerWidth,
+      gBrowser.selectedBrowser.clientWidth,
+      "Inner width matches the selected browser"
+    );
+    is(
+      metrics.innerHeight,
+      gBrowser.selectedBrowser.clientHeight,
+      "Inner height matches the selected browser"
+    );
+  } finally {
+    window.moveTo(originalX, originalY);
+    await cleanup();
+  }
+});
+
+/**
  * Test what happens on a 404 page.
  */
 add_task(async function test_headless_extraction_404() {

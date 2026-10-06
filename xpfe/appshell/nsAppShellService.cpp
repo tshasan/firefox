@@ -179,10 +179,14 @@ class WebBrowserChrome2Stub final : public nsIWebBrowserChrome,
                                     public nsSupportsWeakReference {
  protected:
   nsCOMPtr<nsIWebBrowser> mBrowser;
+  // Where the browser reports its window to be, in device pixels, as set by
+  // nsIWindowlessBrowser::SetScreenRect. Zero-sized at 0,0 until then.
+  LayoutDeviceIntRect mScreenRect;
   virtual ~WebBrowserChrome2Stub() = default;
 
  public:
   void SetBrowser(nsIWebBrowser* aBrowser) { mBrowser = aBrowser; }
+  void SetScreenRect(const LayoutDeviceIntRect& aRect) { mScreenRect = aRect; }
 
   NS_DECL_ISUPPORTS
   NS_DECL_NSIWEBBROWSERCHROME
@@ -231,16 +235,16 @@ NS_IMETHODIMP
 WebBrowserChrome2Stub::GetDimensions(DimensionKind aDimensionKind, int32_t* aX,
                                      int32_t* aY, int32_t* aCX, int32_t* aCY) {
   if (aX) {
-    *aX = 0;
+    *aX = mScreenRect.x;
   }
   if (aY) {
-    *aY = 0;
+    *aY = mScreenRect.y;
   }
   if (aCX) {
-    *aCX = 0;
+    *aCX = mScreenRect.width;
   }
   if (aCY) {
-    *aCY = 0;
+    *aCY = mScreenRect.height;
   }
   return NS_OK;
 }
@@ -292,8 +296,8 @@ class BrowserDestroyer final : public Runnable {
 class WindowlessBrowser final : public nsIWindowlessBrowser,
                                 public nsIInterfaceRequestor {
  public:
-  WindowlessBrowser(nsIWebBrowser* aBrowser, nsISupports* aContainer)
-      : mBrowser(aBrowser), mContainer(aContainer), mClosed(false) {
+  WindowlessBrowser(nsIWebBrowser* aBrowser, WebBrowserChrome2Stub* aChrome)
+      : mBrowser(aBrowser), mChrome(aChrome), mClosed(false) {
     mWebNavigation = do_QueryInterface(aBrowser);
     mInterfaceRequestor = do_QueryInterface(aBrowser);
   }
@@ -314,15 +318,15 @@ class WindowlessBrowser final : public nsIWindowlessBrowser,
     // when it's safe to run scripts. If this was triggered by GC, it may
     // not always be safe to run scripts, in which cases we need to delay
     // destruction until it is.
-    auto runnable = MakeRefPtr<BrowserDestroyer>(mBrowser, mContainer);
+    auto runnable = MakeRefPtr<BrowserDestroyer>(
+        mBrowser, NS_ISUPPORTS_CAST(nsIWebBrowserChrome*, mChrome.get()));
     nsContentUtils::AddScriptRunner(runnable.forget());
   }
 
   nsCOMPtr<nsIWebBrowser> mBrowser;
   nsCOMPtr<nsIWebNavigation> mWebNavigation;
   nsCOMPtr<nsIInterfaceRequestor> mInterfaceRequestor;
-  // we don't use the container but just hold a reference to it.
-  nsCOMPtr<nsISupports> mContainer;
+  RefPtr<WebBrowserChrome2Stub> mChrome;
 
   bool mClosed;
 };
@@ -341,6 +345,15 @@ WindowlessBrowser::Close() {
   mWebNavigation = nullptr;
   mInterfaceRequestor = nullptr;
   return BrowserDestroyer::Destroy(mBrowser);
+}
+
+NS_IMETHODIMP
+WindowlessBrowser::SetScreenRect(int32_t aX, int32_t aY, int32_t aWidth,
+                                 int32_t aHeight) {
+  NS_ENSURE_TRUE(!mClosed, NS_ERROR_NOT_INITIALIZED);
+  NS_ENSURE_ARG(aWidth >= 0 && aHeight >= 0);
+  mChrome->SetScreenRect(LayoutDeviceIntRect(aX, aY, aWidth, aHeight));
+  return NS_OK;
 }
 
 NS_IMETHODIMP
@@ -436,8 +449,7 @@ nsAppShellService::CreateWindowlessBrowser(bool aIsChrome, uint32_t aChromeMask,
   // Make sure the container window owns the the nsWebBrowser instance.
   stub->SetBrowser(browser);
 
-  nsISupports* isstub = NS_ISUPPORTS_CAST(nsIWebBrowserChrome*, stub);
-  RefPtr<nsIWindowlessBrowser> result = new WindowlessBrowser(browser, isstub);
+  RefPtr<nsIWindowlessBrowser> result = new WindowlessBrowser(browser, stub);
   nsCOMPtr<nsIDocShell> docshell = do_GetInterface(result);
   docshell->SetInvisible(true);
 

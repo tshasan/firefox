@@ -72,6 +72,19 @@ export class HiddenFrame {
   }
 
   /**
+   * Places the frame on screen as if it were a window there, so content in it
+   * reports that position and outer size. Set it before creating browsers.
+   *
+   * @param {number} x - In device pixels, like the rest.
+   * @param {number} y
+   * @param {number} width
+   * @param {number} height
+   */
+  setScreenRect(x, y, width, height) {
+    this.#browser.setScreenRect(x, y, width, height);
+  }
+
+  /**
    * Whether `document` is the one inside a hidden frame, which the browsers
    * created in that frame belong to.
    *
@@ -177,24 +190,53 @@ export const HiddenBrowserManager = new (class HiddenBrowserManager {
   /**
    * Creates and returns a new hidden browser.
    *
+   * @param {?HiddenFrame} ownFrame The frame to create the browser in, or null
+   *   for the frame the other hidden browsers share.
    * @param {string} [messageManagerGroup]
    * @param {number} [userContextId]
+   * @param {Window} [windowToMatch]
    */
-  async #acquireBrowser(messageManagerGroup, userContextId) {
-    this.#browsers++;
-    if (!this.#frame) {
-      this.#frame = new HiddenFrame();
+  async #acquireBrowser(
+    ownFrame,
+    messageManagerGroup,
+    userContextId,
+    windowToMatch
+  ) {
+    let hiddenFrame = ownFrame;
+    if (!hiddenFrame) {
+      this.#browsers++;
+      if (!this.#frame) {
+        this.#frame = new HiddenFrame();
+      }
+      hiddenFrame = this.#frame;
     }
 
-    let frame = await this.#frame.get();
+    let frame = await hiddenFrame.get();
+    let width = BACKGROUND_WIDTH;
+    let height = BACKGROUND_HEIGHT;
+    if (windowToMatch) {
+      let contentArea =
+        windowToMatch.gBrowser?.selectedBrowser ??
+        windowToMatch.document.documentElement;
+      let bounds = contentArea.getBoundingClientRect();
+      width = Math.round(bounds.width);
+      height = Math.round(bounds.height);
+      let scale = windowToMatch.devicePixelRatio;
+      hiddenFrame.setScreenRect(
+        Math.round(windowToMatch.screenX * scale),
+        Math.round(windowToMatch.screenY * scale),
+        Math.round(windowToMatch.outerWidth * scale),
+        Math.round(windowToMatch.outerHeight * scale)
+      );
+    }
     let doc = frame.document;
     let browser = doc.createXULElement("browser");
     browser.setAttribute("remote", "true");
     browser.setAttribute("type", "content");
-    browser.style.width = `${BACKGROUND_WIDTH}px`;
-    browser.style.minWidth = `${BACKGROUND_WIDTH}px`;
-    browser.style.height = `${BACKGROUND_HEIGHT}px`;
-    browser.style.minHeight = `${BACKGROUND_HEIGHT}px`;
+    browser.style.width = `${width}px`;
+    browser.style.minWidth = `${width}px`;
+    browser.style.height = `${height}px`;
+    browser.style.minHeight = `${height}px`;
     browser.setAttribute("maychangeremoteness", "true");
     browser.setAttribute("nodefaultsrc", "true");
     if (messageManagerGroup) {
@@ -204,6 +246,12 @@ export const HiddenBrowserManager = new (class HiddenBrowserManager {
       browser.setAttribute("usercontextid", String(userContextId));
     }
     doc.documentElement.appendChild(browser);
+    if (windowToMatch) {
+      // Lay the browser out before it loads anything, so that the remote page
+      // starts at its final size. The windowless document may not reflow
+      // until after the page's scripts have run otherwise.
+      browser.getBoundingClientRect();
+    }
 
     return browser;
   }
@@ -213,10 +261,16 @@ export const HiddenBrowserManager = new (class HiddenBrowserManager {
    *
    * @param {MozBrowser} browser
    *   The hidden browser element.
+   * @param {?HiddenFrame} ownFrame The frame the browser was created in, if
+   *   it isn't the shared one.
    */
-  #releaseBrowser(browser) {
+  #releaseBrowser(browser, ownFrame) {
     browser.remove();
 
+    if (ownFrame) {
+      ownFrame.destroy();
+      return;
+    }
     this.#browsers--;
     if (this.#browsers == 0) {
       this.#frame.destroy();
@@ -236,20 +290,33 @@ export const HiddenBrowserManager = new (class HiddenBrowserManager {
    * @param {string} [options.messageManagerGroup] Specify a custom message manager group for this browser.
    * @param {number} [options.userContextId] The container whose cookies and
    *   storage the browser uses. It can only be set before the browser loads.
+   * @param {Window} [options.windowToMatch] Match this window's screen rectangle
+   *   and content size when creating the browser.
    * @returns {Promise<T>}
    */
   async withHiddenBrowser(
     callback,
-    { messageManagerGroup = undefined, userContextId = undefined } = {}
+    { messageManagerGroup = undefined, userContextId, windowToMatch } = {}
   ) {
-    let browser = await this.#acquireBrowser(
-      messageManagerGroup,
-      userContextId
-    );
+    // The screen rectangle belongs to the whole frame, so a browser matching
+    // a window gets a frame of its own.
+    let ownFrame = windowToMatch ? new HiddenFrame() : null;
+    let browser;
+    try {
+      browser = await this.#acquireBrowser(
+        ownFrame,
+        messageManagerGroup,
+        userContextId,
+        windowToMatch
+      );
+    } catch (error) {
+      ownFrame?.destroy();
+      throw error;
+    }
     try {
       return await callback(browser);
     } finally {
-      this.#releaseBrowser(browser);
+      this.#releaseBrowser(browser, ownFrame);
     }
   }
 })();
