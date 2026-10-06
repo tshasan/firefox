@@ -197,8 +197,10 @@ class CFTurnstileHandler extends CaptchaHandler {
     });
   }
 
+  // "f/av0/rch" is the widget frame Cloudflare serves as of October 2026;
+  // "if/ov2/av0/rcv" is its predecessor.
   static matchesRegex = new RegExp(
-    "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/.+?/turnstile/if/ov2/av0/rcv/"
+    "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/.+?/turnstile/(if/ov2/av0/rcv|f/av0/rch)/"
   );
 
   static matches(document) {
