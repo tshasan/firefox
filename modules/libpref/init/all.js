@@ -3667,6 +3667,9 @@ pref("browser.ml.checkForMemory", true);
 pref("browser.ml.overridePipelineOptions", "{}");
 // How long the PageExtractor waits for a headless page load, in ms.
 pref("browser.ml.pageExtractor.headlessTimeoutMs", 15000);
+// Use CaptchaDetection to report a headless page behind a bot check as
+// blocked, rather than reading the check or waiting out the timeout.
+pref("browser.ml.pageExtractor.captchaDetection.enabled", true);
 
 // Extract video metadata and the transcript from YouTube watch pages during
 // page extraction.

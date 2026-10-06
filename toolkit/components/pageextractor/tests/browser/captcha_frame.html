@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+  <body>
+    <!-- Selects CaptchaDetectionChild's Cloudflare Turnstile handler in automation. -->
+    <div id="captchaType" data-captcha-type="cf-turnstile"></div>
+
+    <template id="contents">
+      <div id="fail" style="display: none"></div>
+      <div id="success" style="display: none"></div>
+    </template>
+
+    <script>
+      const bodyShadowRoot = document.body.attachShadow({ mode: "closed" });
+      bodyShadowRoot.appendChild(
+        document.getElementById("contents").content.cloneNode(true)
+      );
+      // ?state=fail or ?state=success shows that verdict; otherwise the widget
+      // only loads.
+      const state = new URLSearchParams(location.search).get("state");
+      if (state === "fail" || state === "success") {
+        bodyShadowRoot.getElementById(state).style.display = "block";
+      }
+    </script>
+  </body>
+</html>

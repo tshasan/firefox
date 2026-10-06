@@ -2,6 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+const lazy = {};
+
+ChromeUtils.defineESModuleGetters(lazy, {
+  CAPTCHA_EVENT_LABELS:
+    "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
+  CAPTCHA_PROVIDER_NAMES:
+    "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
+});
+
 let schemaRegistered = false;
 
 function ensureSchemaRegistered() {
@@ -71,6 +80,26 @@ function ensureSchemaRegistered() {
         format: "string",
         searchable: true,
       },
+      {
+        key: "blockReason",
+        label: "Block reason",
+        format: "string",
+        searchable: true,
+      },
+      {
+        key: "captchaType",
+        label: "Captcha",
+        format: "string",
+        searchable: true,
+      },
+      {
+        key: "captchaEvent",
+        label: "Captcha event",
+        format: "string",
+        searchable: true,
+      },
+      { key: "detectedBy", label: "Found by", format: "string" },
+      { key: "captchaWaitMs", label: "Captcha wait", format: "duration" },
       { key: "color", hidden: true },
     ],
   });
@@ -123,9 +152,15 @@ function formatOptions(options) {
 let nextId = 1;
 
 const DEFAULT_MARKER_COLOR = "blue";
-// Statuses other than "success" or "error" (e.g. "unavailable",
-// "document-hidden", "empty") are outcomes a caller handles, not exceptions
-// nobody expected.
+// The statuses drawn in the default color: a success, or a step that went as
+// expected. Any other status but "error" (e.g. "unavailable", "blocked",
+// "empty") is an outcome a caller handles, not an exception nobody expected.
+const DEFAULT_COLOR_STATUSES = new Set([
+  "success",
+  "detected",
+  "requested",
+  "appeared",
+]);
 const HANDLED_OUTCOME_MARKER_COLOR = "yellow";
 const ERROR_MARKER_COLOR = "red";
 
@@ -142,7 +177,33 @@ const STATUS_DESCRIPTIONS = new Map([
   ["not-readerable", "Reader Mode declined, read as is"],
   ["document-unloaded", "page replaced before it was ready"],
   ["browser-closed", "browser closed before the page was ready"],
+  ["appeared", "it appeared"],
+  ["gave-up", "it never appeared, so the page is read without it"],
 ]);
+
+/**
+ * @param {string} captchaType
+ * @param {string} captchaEvent
+ * @returns {string} e.g. "Cloudflare Turnstile (check failed)".
+ */
+function describeCaptcha(captchaType, captchaEvent) {
+  const provider = lazy.CAPTCHA_PROVIDER_NAMES.get(captchaType);
+  const event = lazy.CAPTCHA_EVENT_LABELS.get(captchaEvent);
+  return `${provider} (${event})`;
+}
+
+/**
+ * Says in plain language why a site kept a page from being read, from the
+ * fields PageExtractor puts on a "BlockedError".
+ *
+ * @param {{blockReason: string, captchaType?: string, captchaEvent?: string}} details
+ * @returns {string} e.g. "blocked by Cloudflare Turnstile (check failed)".
+ */
+export function describeBlock({ blockReason, captchaType, captchaEvent }) {
+  return blockReason === "captcha"
+    ? `blocked by ${describeCaptcha(captchaType, captchaEvent)}`
+    : "blocked: the page ended up on another site";
+}
 
 /**
  * The outcome of a phase in plain language, for a profile's reader.
@@ -152,6 +213,20 @@ const STATUS_DESCRIPTIONS = new Map([
  */
 function describeOutcome(data) {
   switch (data.status) {
+    case "blocked":
+      // A read with little text beside a widget is the bot check, not the
+      // page, which only the length explains.
+      return data.blockReason === "captcha" && data.textLength !== undefined
+        ? `${describeBlock(data)}, only ${data.textLength} characters on the page`
+        : describeBlock(data);
+    case "detected": {
+      const captcha = describeCaptcha(data.captchaType, data.captchaEvent);
+      return data.detectedBy
+        ? `${captcha}, found by ${data.detectedBy}`
+        : captcha;
+    }
+    case "requested":
+      return lazy.CAPTCHA_PROVIDER_NAMES.get(data.captchaType);
     case "error":
       return `failed with ${data.errorName ?? "an error"}`;
   }
@@ -192,6 +267,10 @@ const GLEAN_EXTRA_KEYS = {
   siteStrategy: "site_strategy",
   status: "status",
   errorName: "error_name",
+  blockReason: "block_reason",
+  captchaType: "captcha_type",
+  captchaEvent: "captcha_event",
+  captchaWaitMs: "captcha_wait_ms",
   textLength: "text_length",
   linkCount: "link_count",
   canvasCount: "canvas_count",
@@ -252,6 +331,25 @@ export class PageExtractorEvent {
     headlessNavigate: {
       name: "headless-navigate",
       label: "Navigate to page",
+    },
+    captchaScript: {
+      name: "captcha-script",
+      label: "Page requested a bot check's script",
+      profilerOnly: true,
+    },
+    captchaDetected: {
+      name: "captcha-detected",
+      label: "Bot check appeared on page",
+    },
+    captchaChanged: {
+      name: "captcha-changed",
+      label: "Bot check changed",
+      profilerOnly: true,
+    },
+    captchaWait: {
+      name: "captcha-wait",
+      label: "Wait for the bot check to appear",
+      profilerOnly: true,
     },
     waitForReady: {
       name: "wait-for-ready",
@@ -393,7 +491,7 @@ export class PageExtractorEvent {
       return;
     }
     ensureSchemaRegistered();
-    if (this.#data.status === "success") {
+    if (DEFAULT_COLOR_STATUSES.has(this.#data.status)) {
       this.#data.color = DEFAULT_MARKER_COLOR;
     } else if (this.#data.status === "error") {
       this.#data.color = ERROR_MARKER_COLOR;
@@ -420,10 +518,11 @@ export class PageExtractorEvent {
   }
 
   /**
-   * Runs `task`, finishing with "success" on resolve or "error" (and
-   * rethrowing) on throw. `task` can call `finish()` itself first for a
-   * more specific status (e.g. "unavailable"); since finish() is
-   * idempotent, the status set here is then a no-op.
+   * Runs `task`, finishing with "success" on resolve, or on throw with
+   * "blocked" for a "BlockedError" and "error" otherwise, and rethrowing.
+   * `task` can call `finish()` itself first for a more specific status
+   * (e.g. "unavailable"); since finish() is idempotent, the status set here
+   * is then a no-op.
    *
    * Private: only `trace()` below calls this, immediately after
    * construction, so that constructing an event and timing a task are
@@ -439,10 +538,21 @@ export class PageExtractorEvent {
       this.finish({ status: "success" });
       return result;
     } catch (error) {
-      // Optional chaining because JS permits throwing anything: a task that
-      // rejects with null would otherwise throw a TypeError here, replacing
-      // the original rejection and leaving this event never finished.
-      this.finish({ status: "error", errorName: error?.name });
+      if (error?.name === "BlockedError") {
+        // The site kept the page from being read, which callers expect and
+        // report, so it isn't counted as an error of ours.
+        this.finish({
+          status: "blocked",
+          blockReason: error.blockReason,
+          captchaType: error.captchaType,
+          captchaEvent: error.captchaEvent,
+        });
+      } else {
+        // Optional chaining because JS permits throwing anything: a task that
+        // rejects with null would otherwise throw a TypeError here, replacing
+        // the original rejection and leaving this event never finished.
+        this.finish({ status: "error", errorName: error?.name });
+      }
       throw error;
     }
   }

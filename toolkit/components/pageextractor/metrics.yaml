@@ -31,7 +31,8 @@ page_extractor:
       cross-reference a shared profile with this data.
 
       Slice by `phase` for a route's outcome and latency (e.g.
-      "headless-extractor" for headless loads, "pdf-extract" for PDFs), by
+      "headless-extractor" for headless loads, "pdf-extract" for PDFs,
+      "captcha-detected" for bot checks in headless loads), by
       `strategy` for how a get-text call read the page ("dom", "reader",
       "youtube-dom", "youtube-transcript", "about-reader"), and by
       `site_strategy` for site-specific handling ("google-search",
@@ -83,14 +84,46 @@ page_extractor:
           outcome such as "unavailable", "document-hidden", "empty",
           "not-readerable" (reader mode declined the page, so it is read
           without boilerplate removal), "document-unloaded" (the document
-          was replaced before it was ready), or "browser-closed" (its browser
+          was replaced before it was ready), "browser-closed" (its browser
           was torn down first, after a failure reported on the phase that
-          caused it).
+          caused it), "blocked" (the site kept the page from being read; see
+          `block_reason`), or "detected" (on "captcha-detected", which is only
+          recorded when a captcha shows up).
       error_name:
         type: string
         description: >
           The thrown error's `name` when status is "error". Omitted
           otherwise.
+      block_reason:
+        type: string
+        description: >
+          Why the site kept the page from being read, when status is
+          "blocked": "off-site" (the load ended up on another site) or
+          "captcha" (a bot check stood in front of the content). Omitted
+          otherwise.
+      captcha_type:
+        type: string
+        description: >
+          The captcha provider CaptchaDetection reported in the page, e.g.
+          "g-recaptcha-v2", "cf-turnstile", "datadome", "hCaptcha",
+          "arkoseLabs". Omitted when none was seen.
+      captcha_event:
+        type: string
+        description: >
+          The latest captcha state seen in the page by the time the phase
+          finished: "shown" (the widget loaded), "challenge" (a puzzle was
+          presented), "blocked" (the provider refused the visitor), "failed"
+          or "passed". "captcha-detected" finishes as the first captcha
+          appears, so there it is the first state, and `duration_ms` is the
+          time from the start of the page load until then. Omitted when no
+          captcha was seen.
+      captcha_wait_ms:
+        type: quantity
+        description: >
+          On "get-text" in a headless load, how long the read waited for a
+          captcha widget to show up after the page requested its script, in
+          milliseconds. A wait of the full limit means the widget never
+          appeared. Omitted when the read didn't wait.
       text_length:
         type: quantity
         description: >

@@ -8,12 +8,21 @@
  * @import { HiddenFrame } from "resource://gre/modules/HiddenFrame.sys.mjs"
  * @import { GetTextOptions, ExtractionResult, PageMetadata } from './PageExtractor.d.ts'
  * @import { PageExtractorChild } from './PageExtractorChild.sys.mjs'
- * @import { PageExtractorPhase, TraceId } from './PageExtractorEvents.sys.mjs'
+ * @import { PageExtractorEvent, PageExtractorPhase, TraceId } from './PageExtractorEvents.sys.mjs'
+ * @import { CaptchaDetectionUpdate } from "moz-src:///toolkit/components/captchadetection/CaptchaDetectionParent.sys.mjs"
  */
 
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
 const lazy = XPCOMUtils.declareLazy({
+  BLOCKING_CAPTCHA_EVENTS:
+    "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
+  CAPTCHA_DETECTION_UPDATE_TOPIC:
+    "moz-src:///toolkit/components/captchadetection/CaptchaDetectionParent.sys.mjs",
+  findCaptchaFrame:
+    "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
+  captchaTypeForLoaderScript:
+    "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
   HiddenBrowserManager: "resource://gre/modules/HiddenFrame.sys.mjs",
   console: () =>
     console.createInstance({
@@ -31,7 +40,284 @@ const lazy = XPCOMUtils.declareLazy({
     pref: "browser.ml.pageExtractor.headlessTimeoutMs",
     default: 15000,
   },
+  useCaptchaDetection: {
+    pref: "browser.ml.pageExtractor.captchaDetection.enabled",
+    default: true,
+  },
 });
+
+// A read shorter than this, in UTF-16 code units, of a page with a captcha
+// widget on it is taken to be the bot check rather than the page.
+const CAPTCHA_PAGE_MAX_TEXT_LENGTH = 1000;
+
+// How long a read waits for a captcha widget whose script the page has
+// requested to show up, before reading the page without it.
+const CAPTCHA_WIDGET_WAIT_MS = 1500;
+
+/**
+ * @typedef {object} BlockDetails
+ * @property {"off-site"|"captcha"} blockReason - Whether the load ended up
+ *   on another site or a bot check stood in front of the content.
+ * @property {string} [captchaType] - The captcha provider, for "captcha".
+ * @property {CaptchaDetectionUpdate["event"]} [captchaEvent] - The latest
+ *   captcha state seen, for "captcha".
+ */
+
+/**
+ * A "BlockedError" carrying why the site kept the page from being read, so
+ * a caller can explain it without parsing the message.
+ *
+ * @param {string} message
+ * @param {BlockDetails} details
+ * @returns {DOMException & BlockDetails}
+ */
+function blockedError(message, details) {
+  return Object.assign(new DOMException(message, "BlockedError"), details);
+}
+
+/**
+ * @param {CaptchaDetectionUpdate} captcha
+ * @returns {BlockDetails}
+ */
+function captchaBlockDetails(captcha) {
+  return {
+    blockReason: "captcha",
+    captchaType: captcha.type,
+    captchaEvent: captcha.event,
+  };
+}
+
+/**
+ * Watches a hidden <browser> for captchas while getHeadlessExtractor loads a
+ * page in it, so that a blocking captcha ends the load, and getText can judge
+ * whether the text it read is the page or the bot check in front of it.
+ */
+class HeadlessCaptchaWatcher {
+  /** @type {WeakMap<Element, HeadlessCaptchaWatcher>} */
+  static #watchers = new WeakMap();
+
+  /**
+   * @param {Element} browser
+   * @returns {HeadlessCaptchaWatcher | null} The watcher of a hidden browser
+   *   getHeadlessExtractor is loading with captcha detection on.
+   */
+  static forBrowser(browser) {
+    return HeadlessCaptchaWatcher.#watchers.get(browser) ?? null;
+  }
+
+  /**
+   * The latest captcha CaptchaDetection reported in the page.
+   *
+   * @type {CaptchaDetectionUpdate | null}
+   */
+  captcha = null;
+
+  /** @type {Element} */
+  #browser;
+  /** @type {PageExtractorEvent} */
+  #loadEvent;
+  /** @type {PageExtractorEvent} */
+  #detectedEvent;
+  /** @type {PromiseWithResolvers<never>} */
+  #blocked = Promise.withResolvers();
+  /**
+   * Set once the page requests a captcha widget's script, and resolved once
+   * CaptchaDetection reports a captcha in it.
+   *
+   * @type {PromiseWithResolvers<void> | null}
+   */
+  #widgetReported = null;
+
+  QueryInterface = ChromeUtils.generateQI(["nsIObserver"]);
+
+  /**
+   * @param {Element} browser - The hidden <browser>, before it loads the page.
+   * @param {PageExtractorEvent} loadEvent - The load's headless-extractor
+   *   event, which records the latest captcha seen.
+   */
+  constructor(browser, loadEvent) {
+    this.#browser = browser;
+    this.#loadEvent = loadEvent;
+    // Only finished, and so only recorded, if a captcha shows up: its
+    // duration is how long into the load that took.
+    this.#detectedEvent = new lazy.PageExtractorEvent(
+      lazy.Phase.captchaDetected,
+      { process: "parent", traceId: loadEvent.traceId }
+    );
+  }
+
+  /**
+   * Rejects with a "BlockedError" once a captcha blocks the page, so that a
+   * read in progress stops there.
+   *
+   * @returns {Promise<never>}
+   */
+  get blocked() {
+    return this.#blocked.promise;
+  }
+
+  start() {
+    HeadlessCaptchaWatcher.#watchers.set(this.#browser, this);
+    Services.obs.addObserver(this, lazy.CAPTCHA_DETECTION_UPDATE_TOPIC);
+    Services.obs.addObserver(this, "http-on-modify-request");
+  }
+
+  stop() {
+    HeadlessCaptchaWatcher.#watchers.delete(this.#browser);
+    Services.obs.removeObserver(this, lazy.CAPTCHA_DETECTION_UPDATE_TOPIC);
+    Services.obs.removeObserver(this, "http-on-modify-request");
+  }
+
+  /**
+   * Waits briefly for a captcha widget whose script the page has requested.
+   * The script runs and inserts the widget's frame after a fast page can
+   * already be read.
+   *
+   * @param {PageExtractorEvent} readEvent - The read's get-text event, which
+   *   records how long it waited.
+   */
+  async waitForRequestedWidget(readEvent) {
+    if (!this.#widgetReported) {
+      return;
+    }
+    const waitStart = ChromeUtils.now();
+    let timeoutId;
+    try {
+      await lazy.PageExtractorEvent.trace(
+        lazy.Phase.captchaWait,
+        { process: "parent", traceId: readEvent.traceId },
+        async waitEvent => {
+          const appeared = await Promise.race([
+            this.#widgetReported.promise.then(() => true),
+            this.blocked,
+            new Promise(resolve => {
+              timeoutId = lazy.setTimeout(
+                () => resolve(false),
+                CAPTCHA_WIDGET_WAIT_MS
+              );
+            }),
+          ]);
+          waitEvent.finish({ status: appeared ? "appeared" : "gave-up" });
+        }
+      );
+    } finally {
+      lazy.clearTimeout(timeoutId);
+      readEvent.addData({
+        captchaWaitMs: Math.round(ChromeUtils.now() - waitStart),
+      });
+    }
+  }
+
+  /**
+   * The captcha a read of `textLength` code units got instead of the page,
+   * if any. A captcha frame may not have reported in by the time the read
+   * ends, so its URL is checked too.
+   *
+   * @param {number} textLength
+   * @returns {CaptchaDetectionUpdate | null}
+   */
+  captchaInsteadOfPage(textLength) {
+    if (textLength >= CAPTCHA_PAGE_MAX_TEXT_LENGTH) {
+      return null;
+    }
+    let captcha = this.captcha;
+    if (!captcha) {
+      captcha = lazy.findCaptchaFrame(this.#browser.browsingContext);
+      if (captcha) {
+        this.#detectedEvent.finish({
+          status: "detected",
+          captchaType: captcha.type,
+          captchaEvent: captcha.event,
+          detectedBy: "its frame's URL, when the page was read",
+        });
+      }
+    }
+    return captcha?.event === "passed" ? null : captcha;
+  }
+
+  /**
+   * @param {nsISupports} subject
+   * @param {string} topic
+   * @param {string} data
+   */
+  observe(subject, topic, data) {
+    if (topic === "http-on-modify-request") {
+      this.#onRequest(subject);
+    } else if (subject === this.#browser) {
+      this.#onCaptchaUpdate(JSON.parse(data));
+    }
+  }
+
+  /** @param {nsISupports} channel */
+  #onRequest(channel) {
+    if (
+      this.#widgetReported ||
+      !(channel instanceof Ci.nsIHttpChannel) ||
+      BrowsingContext.get(channel.loadInfo.browsingContextID)?.browserId !==
+        this.#browser.browserId
+    ) {
+      return;
+    }
+    const type = lazy.captchaTypeForLoaderScript(channel.URI);
+    if (!type) {
+      return;
+    }
+    this.#widgetReported = Promise.withResolvers();
+    new lazy.PageExtractorEvent(lazy.Phase.captchaScript, {
+      process: "parent",
+      traceId: this.#loadEvent.traceId,
+    }).finish({ status: "requested", captchaType: type });
+  }
+
+  /** @param {CaptchaDetectionUpdate} update */
+  #onCaptchaUpdate(update) {
+    this.#widgetReported?.resolve();
+    lazy.console.log("Captcha update in headless page", update);
+    // Nobody solves a captcha in a hidden browser, so a presented puzzle or a
+    // verdict against us means the content stays out of reach. A widget that
+    // merely loaded ("shown") may sit on a form beside readable content.
+    const blocking = lazy.BLOCKING_CAPTCHA_EVENTS.has(update.event);
+    if (this.captcha) {
+      new lazy.PageExtractorEvent(lazy.Phase.captchaChanged, {
+        process: "parent",
+        traceId: this.#loadEvent.traceId,
+      }).finish({
+        status: blocking ? "blocked" : "detected",
+        blockReason: blocking ? "captcha" : undefined,
+        captchaType: update.type,
+        captchaEvent: update.event,
+      });
+    } else {
+      this.#detectedEvent.finish({
+        status: "detected",
+        captchaType: update.type,
+        captchaEvent: update.event,
+        detectedBy: "its frame reporting in",
+      });
+    }
+    // A second widget loading must not mask a verdict already in.
+    if (
+      this.captcha &&
+      lazy.BLOCKING_CAPTCHA_EVENTS.has(this.captcha.event) &&
+      update.event === "shown"
+    ) {
+      return;
+    }
+    this.captcha = update;
+    this.#loadEvent.addData({
+      captchaType: update.type,
+      captchaEvent: update.event,
+    });
+    if (blocking) {
+      this.#blocked.reject(
+        blockedError(
+          `The page is behind a ${update.type} bot check (${update.event}).`,
+          captchaBlockDetails(update)
+        )
+      );
+    }
+  }
+}
 
 // NOTE: Copied from nsSandboxFlags.h.
 // Blocks window.open / target="_blank" popups.
@@ -181,13 +467,31 @@ export class PageExtractorParent extends JSWindowActorParent {
           return result;
         }
 
-        const result = await this.sendQuery("PageExtractorParent:GetText", {
+        const captchaWatcher = HeadlessCaptchaWatcher.forBrowser(
+          this.browsingContext.top.embedderElement
+        );
+        await captchaWatcher?.waitForRequestedWidget(event);
+
+        const query = this.sendQuery("PageExtractorParent:GetText", {
           options,
           traceId: event.traceId,
         });
+        const result = await (captchaWatcher
+          ? Promise.race([query, captchaWatcher.blocked])
+          : query);
         if (!result) {
           event.finish({ status: "unavailable" });
           return null;
+        }
+        const captcha = captchaWatcher?.captchaInsteadOfPage(
+          result.text.length
+        );
+        if (captcha) {
+          event.addData({ textLength: result.text.length });
+          throw blockedError(
+            `The page shows a ${captcha.type} bot check instead of its content.`,
+            captchaBlockDetails(captcha)
+          );
         }
         event.finish({
           status: result.text ? "success" : "empty",
@@ -511,6 +815,11 @@ export class PageExtractorParent extends JSWindowActorParent {
 
             browser.addProgressListener(progressListener, progressFlags);
 
+            const captchaWatcher = lazy.useCaptchaDetection
+              ? new HeadlessCaptchaWatcher(browser, event)
+              : null;
+            captchaWatcher?.start();
+
             lazy.console.log("Loading a headless PageExtractor", url);
 
             /** @type {LoadURIOptions} */
@@ -538,13 +847,13 @@ export class PageExtractorParent extends JSWindowActorParent {
             const timeoutId = lazy.setTimeout(() => {
               if (offSiteLocation) {
                 navigateEvent.finish({
-                  status: "error",
-                  errorName: "BlockedError",
+                  status: "blocked",
+                  blockReason: "off-site",
                 });
                 actorResolver.reject(
-                  new DOMException(
+                  blockedError(
                     `The page ended up at ${offSiteLocation} instead of ${url.href} and never returned within ${timeoutMs}ms.`,
-                    "BlockedError"
+                    { blockReason: "off-site" }
                   )
                 );
                 return;
@@ -562,18 +871,26 @@ export class PageExtractorParent extends JSWindowActorParent {
             }, timeoutMs);
 
             try {
-              return await callback(await actorResolver.promise, traceId);
+              const extraction = actorResolver.promise.then(actor =>
+                callback(actor, traceId)
+              );
+              // A blocking captcha settles the read at once, instead of
+              // waiting out a page that will never get past it.
+              return await (captchaWatcher
+                ? Promise.race([extraction, captchaWatcher.blocked])
+                : extraction);
             } catch (error) {
               if (offSiteLocation && error?.name !== "BlockedError") {
-                throw new DOMException(
+                throw blockedError(
                   `The page navigated to ${offSiteLocation} instead of ${url.href} before its content could be read.`,
-                  "BlockedError"
+                  { blockReason: "off-site" }
                 );
               }
               throw error;
             } finally {
               lazy.clearTimeout(timeoutId);
               browser.removeProgressListener(progressListener, progressFlags);
+              captchaWatcher?.stop();
             }
           },
           {
