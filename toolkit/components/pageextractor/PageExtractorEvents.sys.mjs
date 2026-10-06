@@ -328,6 +328,10 @@ export class PageExtractorEvent {
       name: "headless-extractor",
       label: "Load page in the background",
     },
+    headlessPrepare: {
+      name: "headless-prepare",
+      label: "Prepare background browser",
+    },
     headlessNavigate: {
       name: "headless-navigate",
       label: "Navigate to page",

@@ -23,6 +23,8 @@ const lazy = XPCOMUtils.declareLazy({
     "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
   captchaTypeForLoaderScript:
     "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
+  ContextualIdentityService:
+    "moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs",
   HiddenBrowserManager: "resource://gre/modules/HiddenFrame.sys.mjs",
   console: () =>
     console.createInstance({
@@ -53,6 +55,77 @@ const CAPTCHA_PAGE_MAX_TEXT_LENGTH = 1000;
 // How long a read waits for a captcha widget whose script the page has
 // requested to show up, before reading the page without it.
 const CAPTCHA_WIDGET_WAIT_MS = 1500;
+
+/**
+ * How many anonymous fetches are loading. They share one private container,
+ * which is cleared once none are left.
+ */
+let anonymousFetchCount = 0;
+
+/**
+ * Settles once the anonymous fetches' container has been cleared of
+ * everything queued for clearing so far. A fetch waits on it before loading,
+ * so a clear still running can't wipe a page mid-load.
+ *
+ * @type {Promise<void> | null}
+ */
+let anonymousContainerCleared = null;
+
+/**
+ * The private container anonymous fetches load in, so the pages read neither
+ * the user's cookies and storage nor leave their own in the user's profile.
+ *
+ * @returns {number}
+ */
+function getAnonymousUserContextId() {
+  const identity = lazy.ContextualIdentityService.getPrivateIdentity(
+    "userContextIdInternal.pageExtractor"
+  );
+  if (!identity) {
+    throw new Error("The anonymous fetch container is missing.");
+  }
+  return identity.userContextId;
+}
+
+/**
+ * Queues clearing all data in the anonymous fetches' container.
+ */
+function clearAnonymousContainer() {
+  anonymousContainerCleared = (anonymousContainerCleared ?? Promise.resolve())
+    .then(
+      () =>
+        new Promise(resolve =>
+          Services.clearData.deleteDataFromOriginAttributesPattern(
+            { userContextId: getAnonymousUserContextId() },
+            { onDataDeleted: () => resolve() }
+          )
+        )
+    )
+    // Every later fetch waits on this, so a failed clear must not fail them.
+    .catch(error =>
+      lazy.console.error("Could not clear the anonymous fetch container", error)
+    );
+}
+
+/**
+ * Starts a fetch in the anonymous fetches' container, resolving once the
+ * container is empty of anything an earlier fetch left. Every call must be
+ * matched by leaveAnonymousContainer().
+ */
+async function enterAnonymousContainer() {
+  if (!anonymousContainerCleared) {
+    // Clears what a fetch in an earlier session may have left behind.
+    clearAnonymousContainer();
+  }
+  anonymousFetchCount++;
+  await anonymousContainerCleared;
+}
+
+function leaveAnonymousContainer() {
+  if (--anonymousFetchCount === 0) {
+    clearAnonymousContainer();
+  }
+}
 
 /**
  * @typedef {object} BlockDetails
@@ -620,6 +693,9 @@ export class PageExtractorParent extends JSWindowActorParent {
     }
     // Anonymous fetches must not be downgraded to http by a redirect.
     const allowHttp = !anonymousFetch || url.protocol === "http:";
+    const userContextId = anonymousFetch
+      ? getAnonymousUserContextId()
+      : undefined;
 
     return lazy.PageExtractorEvent.trace(
       lazy.Phase.headlessExtractor,
@@ -627,22 +703,36 @@ export class PageExtractorParent extends JSWindowActorParent {
         process: "parent",
         strategy: anonymousFetch ? "headless-anonymous" : "headless",
       },
-      event => {
+      async event => {
         const { traceId } = event;
 
-        // Covers navigating the hidden browser up to onLocationChange,
-        // before the page-ready wait starts. Whichever of three outcomes
-        // (navigation commits, the actor lookup throws, or the load times
-        // out) happens first finishes it; finish()'s idempotency handles
-        // the rest.
-        const navigateEvent = new lazy.PageExtractorEvent(
-          lazy.Phase.headlessNavigate,
+        // Covers getting a hidden browser ready to load the page in, which
+        // for an anonymous fetch includes waiting out a clear of its
+        // container.
+        const prepareEvent = new lazy.PageExtractorEvent(
+          lazy.Phase.headlessPrepare,
           { process: "parent", traceId }
         );
 
+        if (anonymousFetch) {
+          await enterAnonymousContainer();
+        }
+
         // The hidden browser manager controls the lifetime of the hidden browser.
-        return lazy.HiddenBrowserManager.withHiddenBrowser(
+        const read = lazy.HiddenBrowserManager.withHiddenBrowser(
           async browser => {
+            prepareEvent.finish({ status: "success" });
+
+            // Covers navigating the hidden browser up to onLocationChange,
+            // before the page-ready wait starts. Whichever of three outcomes
+            // (navigation commits, the actor lookup throws, or the load times
+            // out) happens first finishes it; finish()'s idempotency handles
+            // the rest.
+            const navigateEvent = new lazy.PageExtractorEvent(
+              lazy.Phase.headlessNavigate,
+              { process: "parent", traceId }
+            );
+
             if (anonymousFetch) {
               // The goal of these settings is to fetch the page without sending
               // any user data to the origin and without letting the visit affect
@@ -659,9 +749,11 @@ export class PageExtractorParent extends JSWindowActorParent {
               const { browsingContext } = browser;
               // Tracking Protection so third-party trackers on the page cannot profile the request or correlate it with the user.
               browsingContext.useTrackingProtection = true;
+              // The user's cookies, HTTP auth, and other credentials stay out
+              // of the request because the browser loads in its own container.
+              // A cookie the page sets still comes back on its later requests,
+              // as bot checks expect, and is cleared with the container.
               browsingContext.defaultLoadFlags =
-                // Strip cookies, HTTP auth, and other credentials from the request
-                Ci.nsIRequest.LOAD_ANONYMOUS |
                 // Don't write the response into the user's memory cache
                 Ci.nsIRequest.INHIBIT_CACHING |
                 // Don't write the response into the user's persistent (disk) cache
@@ -825,7 +917,9 @@ export class PageExtractorParent extends JSWindowActorParent {
             /** @type {LoadURIOptions} */
             const loadURIOptions = {
               triggeringPrincipal:
-                Services.scriptSecurityManager.createNullPrincipal({}),
+                Services.scriptSecurityManager.createNullPrincipal({
+                  userContextId,
+                }),
             };
             if (anonymousFetch) {
               // Suppress the Referer header so the origin can't learn where the
@@ -835,9 +929,6 @@ export class PageExtractorParent extends JSWindowActorParent {
               ].createInstance(Ci.nsIReferrerInfo);
               referrerInfo.init(Ci.nsIReferrerInfo.NO_REFERRER, true, null);
               loadURIOptions.referrerInfo = referrerInfo;
-              // Don't add an entry for this load to session history.
-              loadURIOptions.loadFlags =
-                Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_HISTORY;
             }
 
             browser.loadURI(url.URI, loadURIOptions);
@@ -898,8 +989,13 @@ export class PageExtractorParent extends JSWindowActorParent {
             // actor can communicate with it. The actor is registered to use this custom
             // message manager group.
             messageManagerGroup: "headless-browsers",
+            userContextId,
           }
         );
+        read.catch(error =>
+          prepareEvent.finish({ status: "error", errorName: error?.name })
+        );
+        return anonymousFetch ? read.finally(leaveAnonymousContainer) : read;
       }
     );
   }

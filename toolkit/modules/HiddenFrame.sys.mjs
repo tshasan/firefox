@@ -178,8 +178,9 @@ export const HiddenBrowserManager = new (class HiddenBrowserManager {
    * Creates and returns a new hidden browser.
    *
    * @param {string} [messageManagerGroup]
+   * @param {number} [userContextId]
    */
-  async #acquireBrowser(messageManagerGroup) {
+  async #acquireBrowser(messageManagerGroup, userContextId) {
     this.#browsers++;
     if (!this.#frame) {
       this.#frame = new HiddenFrame();
@@ -198,6 +199,9 @@ export const HiddenBrowserManager = new (class HiddenBrowserManager {
     browser.setAttribute("nodefaultsrc", "true");
     if (messageManagerGroup) {
       browser.setAttribute("messagemanagergroup", messageManagerGroup);
+    }
+    if (userContextId) {
+      browser.setAttribute("usercontextid", String(userContextId));
     }
     doc.documentElement.appendChild(browser);
 
@@ -230,10 +234,18 @@ export const HiddenBrowserManager = new (class HiddenBrowserManager {
    *   be asynchronous.
    * @param {object} [options]
    * @param {string} [options.messageManagerGroup] Specify a custom message manager group for this browser.
+   * @param {number} [options.userContextId] The container whose cookies and
+   *   storage the browser uses. It can only be set before the browser loads.
    * @returns {Promise<T>}
    */
-  async withHiddenBrowser(callback, { messageManagerGroup = undefined } = {}) {
-    let browser = await this.#acquireBrowser(messageManagerGroup);
+  async withHiddenBrowser(
+    callback,
+    { messageManagerGroup = undefined, userContextId = undefined } = {}
+  ) {
+    let browser = await this.#acquireBrowser(
+      messageManagerGroup,
+      userContextId
+    );
     try {
       return await callback(browser);
     } finally {

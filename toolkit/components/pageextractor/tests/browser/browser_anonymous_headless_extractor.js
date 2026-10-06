@@ -9,6 +9,9 @@ const { PageExtractorParent } = ChromeUtils.importESModule(
 const { HttpServer } = ChromeUtils.importESModule(
   "resource://testing-common/httpd.sys.mjs"
 );
+const { ProfilerTestUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/ProfilerTestUtils.sys.mjs"
+);
 
 // The test directory as a path, e.g. "/browser/toolkit/.../tests/browser/", so
 // the support files can be requested from any of the mochitest server's hosts
@@ -36,7 +39,11 @@ function setupHeadlessExtractionTest(body) {
   const server = new HttpServer();
   const requests = [];
   const cleanupTasks = [];
-  const channelInfo = { loadFlags: null, referrerPolicy: null };
+  const channelInfo = {
+    loadFlags: null,
+    referrerPolicy: null,
+    userContextId: null,
+  };
 
   server.registerPathHandler("/page.html", (request, response) => {
     const captured = {};
@@ -65,6 +72,8 @@ function setupHeadlessExtractionTest(body) {
         return;
       }
       channelInfo.loadFlags = channel.loadFlags;
+      channelInfo.userContextId =
+        channel.loadInfo.originAttributes.userContextId;
       channelInfo.referrerPolicy = channel.referrerInfo?.referrerPolicy ?? null;
     },
   };
@@ -101,6 +110,23 @@ function setupHeadlessExtractionTest(body) {
   return { url, requests, channelInfo, addCookie, cleanup };
 }
 
+function getAnonymousUserContextId() {
+  return ContextualIdentityService.getPrivateIdentity(
+    "userContextIdInternal.pageExtractor"
+  ).userContextId;
+}
+
+/**
+ * @param {string} host
+ * @param {number} userContextId
+ */
+function cookieNames(host, userContextId) {
+  return Services.cookies
+    .getCookiesFromHost(host, { userContextId })
+    .map(cookie => cookie.name)
+    .sort();
+}
+
 function assertAnonymousFetch(requests, channelInfo) {
   is(requests.length, 1, "server should see exactly one request");
   const req = requests[0];
@@ -116,9 +142,10 @@ function assertAnonymousFetch(requests, channelInfo) {
     null,
     "channel for anonymous fetch should be observed"
   );
-  ok(
-    channelInfo.loadFlags & Ci.nsIRequest.LOAD_ANONYMOUS,
-    `anonymous fetch should set LOAD_ANONYMOUS.`
+  is(
+    channelInfo.userContextId,
+    getAnonymousUserContextId(),
+    "anonymous fetch should load in its own container."
   );
   ok(
     channelInfo.loadFlags & Ci.nsIRequest.INHIBIT_CACHING,
@@ -172,6 +199,178 @@ add_task(async function test_anonymous_fetch_channel_config() {
   } finally {
     await cleanup();
   }
+});
+
+/**
+ * A page read anonymously sees none of the user's cookies, on any request or
+ * from script, and leaves nothing behind. Its own cookies still round-trip
+ * while it loads, which a bot check's clearance cookie relies on.
+ */
+add_task(async function test_anonymous_fetch_has_its_own_cookie_jar() {
+  const server = new HttpServer();
+  const cookiesSent = {};
+  const { promise: reported, resolve: report } = Promise.withResolvers();
+  const record = (request, name) => {
+    cookiesSent[name] = request.hasHeader("Cookie")
+      ? request.getHeader("Cookie")
+      : null;
+  };
+  server.registerPathHandler("/jar.html", (request, response) => {
+    record(request, "page");
+    response.setHeader("Content-Type", "text/html; charset=utf-8");
+    response.setHeader("Set-Cookie", "fromServer=1; Path=/");
+    response.write(`<!DOCTYPE html>
+      <html><head><meta charset="utf-8"></head><body>
+      <img src="/pixel.png">
+      <div id="seen"></div>
+      <script>
+        document.getElementById("seen").textContent =
+          "script saw: [" + document.cookie + "]";
+        document.cookie = "fromScript=1; path=/";
+        fetch("/report");
+      </script>
+      </body></html>`);
+  });
+  server.registerPathHandler("/pixel.png", (request, response) => {
+    record(request, "image");
+    response.setHeader("Content-Type", "image/png");
+  });
+  server.registerPathHandler("/report", (request, response) => {
+    record(request, "fetch");
+    response.setStatusLine(request.httpVersion, 204, "No Content");
+    report();
+  });
+  server.start(-1);
+  const { primaryHost: host, primaryPort } = server.identity;
+  // eslint-disable-next-line sdl/no-insecure-url
+  const url = `http://${host}:${primaryPort}/jar.html`;
+
+  Services.cookies.add(
+    host,
+    "/",
+    "userCookie",
+    "secret",
+    false /* secure */,
+    false /* httpOnly */,
+    true /* session */,
+    Date.now() + 60 * 60 * 1000,
+    {},
+    Ci.nsICookie.SAMESITE_UNSET,
+    Ci.nsICookie.SCHEME_HTTP
+  );
+
+  try {
+    const { text } = await PageExtractorParent.getHeadlessExtractor({
+      urlString: url,
+      callback: async pageExtractor => {
+        await reported;
+        return pageExtractor.getText();
+      },
+      anonymousFetch: true,
+    });
+
+    is(cookiesSent.page, null, "the page request carries no cookies");
+    is(
+      cookiesSent.image,
+      "fromServer=1",
+      "an image request carries only the page's own cookie"
+    );
+    is(
+      cookiesSent.fetch,
+      "fromServer=1; fromScript=1",
+      "a script request carries only the page's own cookies"
+    );
+    ok(
+      text.includes("script saw: [fromServer=1]"),
+      `script sees only the page's own cookie, read: ${text}`
+    );
+
+    Assert.deepEqual(
+      cookieNames(host, 0),
+      ["userCookie"],
+      "the page left no cookies with the user's"
+    );
+    const userContextId = getAnonymousUserContextId();
+    await TestUtils.waitForCondition(
+      () => !cookieNames(host, userContextId).length,
+      "the anonymous fetch's container is cleared after the read"
+    );
+  } finally {
+    Services.cookies.remove(host, "userCookie", "/", {});
+    await new Promise(resolve => server.stop(resolve));
+  }
+});
+
+/**
+ * A real tab's history always holds the page it shows, and a page reporting
+ * none gives away that no one is looking at it.
+ */
+add_task(async function test_anonymous_fetch_page_is_in_its_own_history() {
+  const { url, cleanup } = setupHeadlessExtractionTest(SIMPLE_PAGE);
+  try {
+    const historyLength = await PageExtractorParent.getHeadlessExtractor({
+      urlString: url,
+      callback: pageExtractor =>
+        SpecialPowers.spawn(
+          pageExtractor.browsingContext,
+          [],
+          () => content.history.length
+        ),
+      anonymousFetch: true,
+    });
+    is(historyLength, 1, "the page sees itself in its history");
+    is(
+      await PlacesUtils.history.fetch(url),
+      null,
+      "the visit still stays out of the user's history"
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * Waiting for the container to be cleared and setting up the hidden browser
+ * are timed as preparing the load, so they don't pass for a slow navigation.
+ */
+add_task(async function test_anonymous_fetch_times_preparation_apart() {
+  const { url, cleanup } = setupHeadlessExtractionTest(SIMPLE_PAGE);
+  await ProfilerTestUtils.startProfilerForMarkerTests();
+  let profile;
+  try {
+    await PageExtractorParent.getHeadlessExtractor({
+      urlString: url,
+      callback: pageExtractor => pageExtractor.getText(),
+      anonymousFetch: true,
+    });
+    profile = await ProfilerTestUtils.stopNowAndGetProfile();
+  } finally {
+    if (Services.profiler.IsActive()) {
+      await Services.profiler.StopProfiler();
+    }
+    await cleanup();
+  }
+
+  const markers = ProfilerTestUtils.getInflatedMarkerData(
+    profile.threads[0]
+  ).filter(marker => marker.data?.type === "PageExtractor");
+  const load = markers.find(
+    marker => marker.data.phase === "headless-extractor"
+  );
+  const findPhase = phase =>
+    markers.find(
+      marker =>
+        marker.data.phase === phase && marker.data.traceId === load.data.traceId
+    );
+  const prepare = findPhase("headless-prepare");
+  const navigate = findPhase("headless-navigate");
+  ok(prepare, "Preparing the load is recorded on the load's track.");
+  ok(navigate, "Navigating is recorded on the load's track.");
+  Assert.greaterOrEqual(
+    navigate.startTime,
+    prepare.endTime,
+    "Navigating is only timed once the hidden browser is ready."
+  );
 });
 
 add_task(async function test_anonymous_fetch_rejects_non_loopback_http() {
