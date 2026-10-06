@@ -47,7 +47,12 @@ function setupHeadlessExtractionTest(body) {
 
   server.registerPathHandler("/page.html", (request, response) => {
     const captured = {};
-    for (const name of ["Cookie", "Authorization"]) {
+    for (const name of [
+      "Cookie",
+      "Authorization",
+      "Sec-Fetch-Site",
+      "Sec-Fetch-User",
+    ]) {
       captured[name] = request.hasHeader(name) ? request.getHeader(name) : null;
     }
     requests.push(captured);
@@ -371,6 +376,62 @@ add_task(async function test_anonymous_fetch_times_preparation_apart() {
     prepare.endTime,
     "Navigating is only timed once the hidden browser is ready."
   );
+});
+
+/**
+ * The user asked for the page, so its load carries their activation like an
+ * address typed into the URL bar.
+ */
+add_task(async function test_anonymous_fetch_navigates_like_a_typed_address() {
+  const { url, requests, cleanup } = setupHeadlessExtractionTest(SIMPLE_PAGE);
+  try {
+    const activation = await PageExtractorParent.getHeadlessExtractor({
+      urlString: url,
+      callback: pageExtractor =>
+        SpecialPowers.spawn(pageExtractor.browsingContext, [], () => ({
+          hasBeenActive: content.navigator.userActivation.hasBeenActive,
+          isActive: content.navigator.userActivation.isActive,
+        })),
+      anonymousFetch: true,
+    });
+    is(requests.length, 1, "server should see exactly one request");
+    is(requests[0]["Sec-Fetch-Site"], "none", "Sec-Fetch-Site is none");
+    is(requests[0]["Sec-Fetch-User"], "?1", "Sec-Fetch-User is ?1");
+    Assert.deepEqual(
+      activation,
+      { hasBeenActive: false, isActive: false },
+      "The loaded page gets no user activation from the navigation."
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * Only an anonymous fetch, whose container is thrown away, carries the
+ * user's activation: it also records a user visit for bounce tracking.
+ */
+add_task(async function test_default_fetch_does_not_navigate_like_typed() {
+  const { url, requests, cleanup } = setupHeadlessExtractionTest(SIMPLE_PAGE);
+  try {
+    await PageExtractorParent.getHeadlessExtractor({
+      urlString: url,
+      callback: pageExtractor => pageExtractor.getText(),
+    });
+    is(requests.length, 1, "server should see exactly one request");
+    is(
+      requests[0]["Sec-Fetch-Site"],
+      "cross-site",
+      "A default fetch is a cross-site navigation"
+    );
+    Assert.strictEqual(
+      requests[0]["Sec-Fetch-User"],
+      null,
+      "A default fetch carries no user activation"
+    );
+  } finally {
+    await cleanup();
+  }
 });
 
 add_task(async function test_anonymous_fetch_rejects_non_loopback_http() {

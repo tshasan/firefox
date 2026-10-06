@@ -929,6 +929,12 @@ export class PageExtractorParent extends JSWindowActorParent {
               ].createInstance(Ci.nsIReferrerInfo);
               referrerInfo.init(Ci.nsIReferrerInfo.NO_REFERRER, true, null);
               loadURIOptions.referrerInfo = referrerInfo;
+              // Navigate the way an address typed by the user does, with
+              // Sec-Fetch-Site "none" and Sec-Fetch-User "?1". A cross-site
+              // navigation without a referrer is rarely a person. This also
+              // counts as a user visit for bounce tracking, which is fine in
+              // a container that is thrown away.
+              loadURIOptions.hasValidUserGestureActivation = true;
             }
 
             browser.loadURI(url.URI, loadURIOptions);
