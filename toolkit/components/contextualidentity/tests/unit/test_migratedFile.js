@@ -264,10 +264,74 @@ add_task(async function migratedFileV7() {
 
   await cis.save();
   let saved = await IOUtils.readJSON(path);
-  equal(saved.version, 8, "Migrated file is saved as version 8");
+  equal(
+    saved.version,
+    cis.LAST_CONTAINERS_JSON_VERSION,
+    "Migrated file is saved with the current version"
+  );
   ok(
     saved.identities.every(identity => !("l10nId" in identity)),
     "Saved file stores no Fluent ids"
+  );
+});
+
+// A version 8 file predates PageExtractor's private identity. It must get a
+// userContextId no identity has used, even one the user since deleted, so it
+// never inherits data left behind in that container.
+add_task(async function migratedFileV8() {
+  const path = PathUtils.join(profileDir.path, "test-containers-v8.json");
+  await IOUtils.writeJSON(
+    path,
+    {
+      version: 8,
+      lastUserContextId: 7,
+      identities: [
+        { userContextId: 1, public: true, icon: "fingerprint", color: "blue" },
+        { userContextId: 2, public: true, icon: "briefcase", color: "orange" },
+        { userContextId: 3, public: true, icon: "dollar", color: "green" },
+        { userContextId: 4, public: true, icon: "cart", color: "pink" },
+        {
+          userContextId: 5,
+          public: false,
+          icon: "",
+          color: "",
+          name: "userContextIdInternal.thumbnail",
+        },
+        {
+          userContextId: 6,
+          public: true,
+          icon: "cart",
+          color: "pink",
+          name: "Custom user-created identity",
+        },
+      ],
+    },
+    { tmpPath: path + ".tmp" }
+  );
+
+  let cis = ContextualIdentityService.createNewInstanceForTesting(path);
+  equal(
+    cis.getPrivateIdentity("userContextIdInternal.pageExtractor")
+      ?.userContextId,
+    8,
+    "The PageExtractor identity takes the next unused userContextId"
+  );
+  equal(
+    cis.getUserContextLabel(6),
+    "Custom user-created identity",
+    "The user-created identity keeps its userContextId"
+  );
+
+  await cis.save();
+  let saved = await IOUtils.readJSON(path);
+  equal(saved.version, 9, "Migrated file is saved as version 9");
+  equal(saved.lastUserContextId, 8, "The identity's id is recorded as used");
+
+  let next = cis.create("Next container", "fingerprint", "blue");
+  equal(
+    next.userContextId,
+    9,
+    "A new container never reuses the identity's id"
   );
 });
 

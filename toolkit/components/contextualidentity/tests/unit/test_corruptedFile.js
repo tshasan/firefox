@@ -60,6 +60,10 @@ add_task(async function corruptedFile() {
     .filter(identity => identity.name === "userContextIdInternal.thumbnail")
     .pop().userContextId;
 
+  const pageExtractorPrivateId = ContextualIdentityService._defaultIdentities
+    .filter(identity => identity.name === "userContextIdInternal.pageExtractor")
+    .pop().userContextId;
+
   const webextStoragePrivateId = ContextualIdentityService._defaultIdentities
     .filter(
       identity => identity.name === "userContextIdInternal.webextStorageLocal"
@@ -114,8 +118,8 @@ add_task(async function corruptedFile() {
   // is the expected one.
   equal(
     cis._lastUserContextId,
-    thumbnailPrivateId,
-    "Expect cis._lastUserContextId to be equal to the thumbnails userContextId"
+    pageExtractorPrivateId,
+    "Expect cis._lastUserContextId to be equal to the PageExtractor userContextId"
   );
 
   const privThumbnailIdentity = cis.getPrivateIdentity(

@@ -4,7 +4,7 @@
 
 // The maximum valid numeric value for the userContextId.
 const MAX_USER_CONTEXT_ID = -1 >>> 0;
-const LAST_CONTAINERS_JSON_VERSION = 8;
+const LAST_CONTAINERS_JSON_VERSION = 9;
 const SAVE_DELAY_MS = 1500;
 const CONTEXTUAL_IDENTITY_ENABLED_PREF = "privacy.userContext.enabled";
 
@@ -201,6 +201,15 @@ _ContextualIdentityService.prototype = {
       icon: "",
       color: "",
       name: "userContextIdInternal.thumbnail",
+      accessKey: "",
+    },
+    // Holds the cookies and storage of PageExtractor's anonymous fetches, so
+    // they never reach the user's own data.
+    {
+      public: false,
+      icon: "",
+      color: "",
+      name: "userContextIdInternal.pageExtractor",
       accessKey: "",
     },
     // This userContextId is used by ExtensionStorageIDB.sys.mjs to create an IndexedDB database
@@ -749,6 +758,11 @@ _ContextualIdentityService.prototype = {
       saveNeeded = true;
     }
 
+    if (data.version == 8) {
+      data = this.migrate8to9(data);
+      saveNeeded = true;
+    }
+
     if (data.version != LAST_CONTAINERS_JSON_VERSION) {
       dump(
         "ERROR - ContextualIdentityService - Unknown version found in " +
@@ -1166,6 +1180,22 @@ _ContextualIdentityService.prototype = {
     }
 
     data.version = 8;
+
+    return data;
+  },
+
+  migrate8to9(data) {
+    // Migrating from 8 to 9 is:
+    // - adding the private identity used by PageExtractor's anonymous fetches,
+    //   with a userContextId no existing identity has ever used
+    // - increasing the version id.
+    const pageExtractorIdentity = this.getDefaultPrivateIdentity(
+      "userContextIdInternal.pageExtractor"
+    );
+    pageExtractorIdentity.userContextId = ++data.lastUserContextId;
+    data.identities.push(pageExtractorIdentity);
+
+    data.version = 9;
 
     return data;
   },
