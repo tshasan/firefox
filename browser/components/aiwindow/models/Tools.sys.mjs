@@ -45,7 +45,13 @@ ChromeUtils.defineESModuleGetters(lazy, {
   AIWindow:
     "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
+  CAPTCHA_EVENT_EXPLANATIONS:
+    "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
+  CAPTCHA_PROVIDER_NAMES:
+    "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
   clearTimeout: "resource://gre/modules/Timer.sys.mjs",
+  describeBlock:
+    "moz-src:///toolkit/components/pageextractor/PageExtractorEvents.sys.mjs",
   AITab: "moz-src:///browser/components/aiwindow/models/aitab/AITab.sys.mjs",
   AITabStore:
     "moz-src:///browser/components/aiwindow/ui/modules/AITabStore.sys.mjs",
@@ -1060,6 +1066,27 @@ function raceAbort(promise, signal) {
 }
 
 /**
+ * Tells the model why a page read was blocked, from the fixed fields
+ * PageExtractor attaches to a "BlockedError". The error's message is left
+ * out: it carries a URL the site chose.
+ *
+ * @param {string} url
+ * @param {{blockReason: string, captchaType?: string, captchaEvent?: string}} error
+ * @returns {string}
+ */
+function describeBlockedPage(url, error) {
+  const advice =
+    "so its content is unavailable. Do not retry it. If the user needs " +
+    "this page, suggest they open it themselves.";
+  if (error.blockReason === "captcha") {
+    const provider = lazy.CAPTCHA_PROVIDER_NAMES.get(error.captchaType);
+    const why = lazy.CAPTCHA_EVENT_EXPLANATIONS.get(error.captchaEvent);
+    return `The page at ${url} is behind a CAPTCHA from ${provider}: ${why}, ${advice}`;
+  }
+  return `The page at ${url} redirected to a different site, likely a bot-detection or sign-in page, ${advice}`;
+}
+
+/**
  * Class for handling page content extraction with configurable modes and limits.
  */
 export class GetPageContent {
@@ -1164,10 +1191,15 @@ export class GetPageContent {
           }
           if (error?.name === "BlockedError") {
             lazy.console.log("[Tool] getPageContent was blocked", error);
+            ChromeUtils.addProfilerMarker(
+              "SmartWindow",
+              { startTime },
+              `Tool:get_page_content(${url}) ${lazy.describeBlock(error)}`
+            );
             return {
               url,
               ok: false,
-              content: `The page at ${url_list[index]} appears to block automated access (e.g. a bot-detection challenge), so its content is unavailable. Do not retry it.`,
+              content: describeBlockedPage(url_list[index], error),
             };
           }
           console.error(error);

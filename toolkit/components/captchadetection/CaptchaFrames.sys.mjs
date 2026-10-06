@@ -101,6 +101,20 @@ export const CAPTCHA_EVENT_LABELS = new Map([
 ]);
 
 /**
+ * The captcha states CaptchaDetection reports, explained in a sentence, as to
+ * someone who needs to know why a page couldn't be read.
+ *
+ * @type {Map<string, string>}
+ */
+export const CAPTCHA_EVENT_EXPLANATIONS = new Map([
+  ["shown", "it shows a verification check instead of the page"],
+  ["challenge", "it asked for a puzzle to be solved"],
+  ["blocked", "the site refused the request outright"],
+  ["failed", "the check flagged the request as automated"],
+  ["passed", "the check let the request through"],
+]);
+
+/**
  * The captcha provider whose widget frame a document at `uri` is, if any.
  * CaptchaDetectionChild picks the handler for a frame by it, and
  * findCaptchaFrame finds the captcha frames in a page by it.

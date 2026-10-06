@@ -25,6 +25,10 @@ const { MESSAGE_ROLE } = ChromeUtils.importESModule(
   "moz-src:///browser/components/aiwindow/ui/modules/ChatEnums.sys.mjs"
 );
 
+const { ProfilerTestUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/ProfilerTestUtils.sys.mjs"
+);
+
 /**
  * @import { ChatConversation } from "../../modules/ChatConversation.sys.mjs"
  */
@@ -179,8 +183,8 @@ add_task(async function test_get_page_content_page_redirected_to_challenge() {
 
     Assert.equal(
       toolMessage.content.body.join("\n"),
-      `The page at ${url} appears to block automated access (e.g. a bot-detection challenge), so its content is unavailable. Do not retry it.`,
-      "The model is told the page blocks automated access, not that it timed out."
+      `The page at ${url} redirected to a different site, likely a bot-detection or sign-in page, so its content is unavailable. Do not retry it. If the user needs this page, suggest they open it themselves.`,
+      "The model is told the page redirected away, not that it timed out."
     );
 
     // Nothing renders below unless the turn ran to completion.
@@ -209,5 +213,124 @@ add_task(async function test_get_page_content_page_redirected_to_challenge() {
     await BrowserTestUtils.closeWindow(win);
     await stopServer();
     await SpecialPowers.popPrefEnv();
+  }
+});
+
+/**
+ * A get_page_content read of a page whose bot check flags the hidden
+ * browser tells the model the page is behind a CAPTCHA, which provider
+ * runs it and what it did, so it can explain that to the user. The captcha
+ * is a real iframe the real CaptchaDetection actor recognizes; only the
+ * model is mocked.
+ */
+add_task(async function test_get_page_content_page_behind_captcha() {
+  const mockEngineManager = new MockEngineManager();
+  const { win, sidebarBrowser } = await openAIWindowWithSidebar();
+  const { html } = MLTestUtils.serveHTML();
+  const { url, cleanup: stopServer } = html`
+    <p>Verify you are human.</p>
+    <iframe
+      src="https://example.org/browser/toolkit/components/pageextractor/tests/browser/captcha_frame.html?state=fail"
+    ></iframe>
+  `;
+
+  await ProfilerTestUtils.startProfilerForMarkerTests();
+  try {
+    await mockEngineManager.respondTo({
+      purpose: "convo-starters-sidebar",
+      response: "A suggested conversation starter.",
+    });
+
+    await typeInSmartbar(sidebarBrowser, "What does that page say?");
+    await submitSmartbar(sidebarBrowser);
+
+    /** @type {ChatConversation} */
+    const conversation = await TestUtils.waitForCondition(
+      () => AIWindow.getActiveConversation(win),
+      "Conversation should be created when the first message is sent."
+    );
+
+    await mockEngineManager.respondTo({
+      purpose: "chat",
+      response: {
+        text: "",
+        tokens: null,
+        isPrompt: false,
+        toolCalls: [
+          {
+            id: "call_get_page_content_1",
+            function: {
+              name: GET_PAGE_CONTENT,
+              arguments: JSON.stringify({ url_list: [url] }),
+            },
+          },
+        ],
+      },
+    });
+
+    const { request, respond } = await mockEngineManager.captureRequest({
+      purpose: "chat",
+    });
+    const toolResult = JSON.stringify(request.args);
+    Assert.stringContains(
+      toolResult,
+      // The URL reaches the model as a token, so only the reason is matched.
+      "is behind a CAPTCHA from Cloudflare Turnstile: the check flagged the request as automated",
+      "The model is told the page is behind a CAPTCHA, by whom, and why it failed."
+    );
+    Assert.stringContains(
+      toolResult,
+      "suggest they open it themselves",
+      "The model is told how the user can still get to the page."
+    );
+
+    const profile = await ProfilerTestUtils.stopNowAndGetProfile();
+    // A text marker's text is stored as an index into its thread's strings.
+    const markerTexts = ProfilerTestUtils.getThreads(profile).flatMap(thread =>
+      ProfilerTestUtils.getPayloadsOfType(thread, "Text").map(
+        payload => thread.stringTable[payload.name]
+      )
+    );
+    ok(
+      markerTexts.includes(
+        `Tool:get_page_content(${url}) blocked by Cloudflare Turnstile (check failed)`
+      ),
+      "A profile shows the page read was blocked by a captcha, and whose."
+    );
+
+    const answer = "That page is behind a CAPTCHA, so I could not read it.";
+    await respond(answer);
+    await mockEngineManager.respondTo({
+      purpose: "title-generation",
+      response: "Page read",
+    });
+
+    const rendered = await TestUtils.waitForCondition(async () => {
+      const messages = await getSidebarChatMessages(sidebarBrowser);
+      return messages.find(
+        message => message.role === "assistant" && message.hasRendered
+      );
+    }, "The assistant should render a reply once the turn completes.");
+    Assert.equal(
+      rendered.message,
+      answer,
+      "The turn completes and the assistant answers from the blocked read."
+    );
+    ok(
+      conversation.messages.some(
+        message =>
+          message.role === MESSAGE_ROLE.TOOL &&
+          message.content?.name === GET_PAGE_CONTENT
+      ),
+      "The blocked read is kept in the conversation as a tool result."
+    );
+  } finally {
+    if (Services.profiler.IsActive()) {
+      await Services.profiler.StopProfiler();
+    }
+    mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
+    await BrowserTestUtils.closeWindow(win);
+    await stopServer();
   }
 });
