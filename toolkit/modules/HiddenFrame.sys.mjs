@@ -72,6 +72,25 @@ export class HiddenFrame {
   }
 
   /**
+   * Whether `document` is the one inside a hidden frame, which the browsers
+   * created in that frame belong to.
+   *
+   * @param {?Document} document
+   * @returns {boolean}
+   */
+  static isHiddenDocument(document) {
+    if (!document) {
+      return false;
+    }
+    for (let hiddenFrame of gAllHiddenFrames) {
+      if (hiddenFrame.#browser?.document === document) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Destroys the browser, freeing resources.
    */
   destroy() {

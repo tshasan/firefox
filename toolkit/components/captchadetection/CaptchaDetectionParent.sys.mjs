@@ -13,10 +13,17 @@ ChromeUtils.defineLazyGetter(lazy, "console", () => {
 });
 
 ChromeUtils.defineESModuleGetters(lazy, {
+  BLOCKING_CAPTCHA_EVENTS:
+    "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
+  CAPTCHA_EVENT_LABELS:
+    "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
+  CAPTCHA_PROVIDER_NAMES:
+    "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
   CaptchaDetectionPingUtils:
     "moz-src:///toolkit/components/captchadetection/CaptchaDetectionPingUtils.sys.mjs",
   CaptchaResponseObserver:
     "moz-src:///toolkit/components/captchadetection/CaptchaResponseObserver.sys.mjs",
+  HiddenFrame: "resource://gre/modules/HiddenFrame.sys.mjs",
 });
 
 /**
@@ -66,11 +73,130 @@ class DocCaptchaState {
 const docState = new DocCaptchaState();
 
 /**
+ * Notified for every captcha state change, so a feature can react to a
+ * captcha in a page it loaded. The subject is the <browser> showing the
+ * page; the data is a JSON `CaptchaDetectionUpdate`.
+ */
+export const CAPTCHA_DETECTION_UPDATE_TOPIC = "captcha-detection-update";
+
+/**
+ * @typedef CaptchaDetectionUpdate
+ * @type {object}
+ * @property {string} type - The captcha provider, e.g. "cf-turnstile".
+ * @property {"shown"|"challenge"|"blocked"|"failed"|"passed"} event -
+ *   "shown" means the widget loaded, which on its own is not evidence that
+ *   anything is gated behind it. "challenge" means a puzzle was presented,
+ *   "blocked" that the provider refused the visitor outright, and "failed"
+ *   or "passed" the verdict of a check.
+ */
+
+/** @type {boolean} */
+let markerSchemaRegistered = false;
+
+/**
+ * @param {{captchaType: string, event: string, hiddenBrowser: string}} data
+ * @param {number} innerWindowId - The top window the captcha is in, so the
+ *   marker lands on that page's track.
+ */
+function addCaptchaMarker(data, innerWindowId) {
+  if (!markerSchemaRegistered) {
+    markerSchemaRegistered = true;
+    ChromeUtils.registerMarkerSchema({
+      name: "CaptchaDetection",
+      tooltipLabel:
+        "Captcha from {marker.data.provider} ({marker.data.eventLabel})",
+      tableLabel:
+        "Captcha from {marker.data.provider} ({marker.data.eventLabel})",
+      chartLabel: "{marker.data.provider} ({marker.data.eventLabel})",
+      display: ["marker-chart", "marker-table"],
+      colorField: "color",
+      data: [
+        {
+          key: "provider",
+          label: "Provider",
+          format: "string",
+          searchable: true,
+        },
+        {
+          key: "eventLabel",
+          label: "What happened",
+          format: "string",
+          searchable: true,
+        },
+        {
+          key: "captchaType",
+          label: "Provider id",
+          format: "string",
+          searchable: true,
+        },
+        { key: "event", label: "Event", format: "string", searchable: true },
+        { key: "hiddenBrowser", label: "Hidden browser", format: "string" },
+        { key: "color", hidden: true },
+      ],
+    });
+  }
+  ChromeUtils.addProfilerMarker(
+    "CaptchaDetection",
+    { category: "JavaScript", innerWindowId },
+    {
+      type: "CaptchaDetection",
+      ...data,
+      provider: lazy.CAPTCHA_PROVIDER_NAMES.get(data.captchaType),
+      eventLabel: lazy.CAPTCHA_EVENT_LABELS.get(data.event),
+      // A check that went against the visitor is drawn like any other
+      // outcome a caller handles, the rest like a success.
+      color: lazy.BLOCKING_CAPTCHA_EVENTS.has(data.event) ? "yellow" : "blue",
+    }
+  );
+}
+
+/** @type {Map<string, CaptchaDetectionUpdate["event"]>} */
+const RECAPTCHA_UPDATE_EVENTS = new Map([
+  ["ImagesShown", "challenge"],
+  ["GotCheckmark", "passed"],
+]);
+
+/** @type {Map<string, CaptchaDetectionUpdate["event"]>} */
+const HCAPTCHA_UPDATE_EVENTS = new Map([
+  ["shown", "challenge"],
+  ["passed", "passed"],
+]);
+
+/**
+ * Maps a provider-specific "CaptchaState:Update" message to the shared
+ * `CaptchaDetectionUpdate` event vocabulary.
+ *
+ * @param {object} data - The message data.
+ * @returns {CaptchaDetectionUpdate["event"] | null}
+ */
+function toUpdateEvent(data) {
+  switch (data.type) {
+    case "g-recaptcha-v2":
+      return RECAPTCHA_UPDATE_EVENTS.get(data.changes) ?? null;
+    case "cf-turnstile":
+      return data.result === "Succeeded" ? "passed" : "failed";
+    case "datadome":
+      if (data.event === "passed") {
+        return "passed";
+      }
+      if (data.blocked) {
+        return "blocked";
+      }
+      return data.captchaShown ? "challenge" : null;
+    case "hCaptcha":
+      return HCAPTCHA_UPDATE_EVENTS.get(data.changes) ?? null;
+  }
+  return null;
+}
+
+/**
  * This actor parent is responsible for recording the state of captchas
  * or communicating with parent browsing context.
  */
 class CaptchaDetectionParent extends JSWindowActorParent {
   #responseObserver;
+  /** @type {?boolean} */
+  #hiddenBrowser = null;
 
   actorCreated() {
     lazy.console.debug("actorCreated");
@@ -215,6 +341,11 @@ class CaptchaDetectionParent extends JSWindowActorParent {
       solutionsSubmitted,
     });
 
+    this.#notifyUpdate("arkoseLabs", solved ? "passed" : "failed");
+    if (this.#inHiddenBrowser) {
+      return;
+    }
+
     const isPBM = this.browsingContext.usePrivateBrowsing;
 
     const suffix = isPBM ? "Pbm" : "";
@@ -290,6 +421,40 @@ class CaptchaDetectionParent extends JSWindowActorParent {
       }
     );
     this.#responseObserver.register();
+  }
+
+  /**
+   * A hidden browser loads pages on Firefox's behalf rather than the user's,
+   * so its captchas stay out of the captcha-detection ping, which measures
+   * what users run into.
+   */
+  get #inHiddenBrowser() {
+    this.#hiddenBrowser ??= lazy.HiddenFrame.isHiddenDocument(
+      this.browsingContext.top.embedderElement?.ownerDocument
+    );
+    return this.#hiddenBrowser;
+  }
+
+  /**
+   * @param {string} type
+   * @param {CaptchaDetectionUpdate["event"] | null} event
+   */
+  #notifyUpdate(type, event) {
+    if (!event) {
+      return;
+    }
+    const hiddenBrowser = this.#inHiddenBrowser;
+    if (Services.profiler.IsActive()) {
+      addCaptchaMarker(
+        { captchaType: type, event, hiddenBrowser: String(hiddenBrowser) },
+        this.#topInnerWindowId
+      );
+    }
+    Services.obs.notifyObservers(
+      this.browsingContext.top.embedderElement,
+      CAPTCHA_DETECTION_UPDATE_TOPIC,
+      JSON.stringify({ type, event })
+    );
   }
 
   get #topInnerWindowId() {
@@ -379,6 +544,10 @@ class CaptchaDetectionParent extends JSWindowActorParent {
 
     switch (message.name) {
       case "CaptchaState:Update":
+        this.#notifyUpdate(message.data.type, toUpdateEvent(message.data));
+        if (this.#inHiddenBrowser) {
+          break;
+        }
         switch (message.data.type) {
           case "g-recaptcha-v2":
             this.#updateGRecaptchaV2State(message.data);
@@ -399,6 +568,10 @@ class CaptchaDetectionParent extends JSWindowActorParent {
         // => message.data = {
         //   type: string,
         // }
+        this.#notifyUpdate(message.data.type, "shown");
+        if (this.#inHiddenBrowser) {
+          break;
+        }
         this.recordCaptchaHandlerConstructed(message.data);
         break;
       case "Page:Hide":

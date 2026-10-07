@@ -3,8 +3,8 @@
 
 "use strict";
 
-// The handlers take a test-only shortcut on the test pages' contents, so
-// real provider URLs are checked here.
+// The handlers and helpers take test-only shortcuts on the test pages'
+// file names, so real provider URLs are checked here.
 
 /**
  * The widget frames of each provider, by the URLs live pages loaded them
@@ -72,6 +72,48 @@ add_task(async function test_captcha_frame_urls() {
       captchaTypeForURI(Services.io.newURI(spec)),
       expected,
       `${spec} is ${expected ? `a ${expected} widget frame` : "not a widget frame"}.`
+    );
+  }
+});
+
+/**
+ * The captcha scripts a read waits on, as live pages requested them on
+ * 2026-10-05. A read only waits on a script whose widget CaptchaDetection
+ * goes on to report, so reCAPTCHA v3, which only renders an invisible
+ * frame, must not match.
+ */
+add_task(async function test_captcha_loader_scripts() {
+  const { captchaTypeForLoaderScript } = ChromeUtils.importESModule(
+    "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs"
+  );
+  const cases = [
+    ["https://www.google.com/recaptcha/api.js", "g-recaptcha-v2"],
+    [
+      "https://www.google.com/recaptcha/api.js?onload=cb&render=explicit",
+      "g-recaptcha-v2",
+    ],
+    ["https://www.google.com/recaptcha/enterprise.js", "g-recaptcha-v2"],
+    ["https://js.hcaptcha.com/1/api.js", "hCaptcha"],
+    ["https://ct.captcha-delivery.com/c.js", "datadome"],
+    [
+      "https://www.google.com/recaptcha/api.js?render=6Lcyqq8oAAAAAJE7eVJ3aZp_hnJcI6LgGdYD8lge",
+      null,
+    ],
+    [
+      "https://challenges.cloudflare.com/turnstile/v0/api.js?onload=cb&render=explicit",
+      "cf-turnstile",
+    ],
+    [
+      "https://client-api.arkoselabs.com/v2/11111111-1111-1111-1111-111111111111/api.js",
+      "arkoseLabs",
+    ],
+    ["https://www.gstatic.com/recaptcha/releases/x/recaptcha__en.js", null],
+  ];
+  for (const [spec, expected] of cases) {
+    is(
+      captchaTypeForLoaderScript(Services.io.newURI(spec)),
+      expected,
+      `${spec} is ${expected ? `a ${expected} widget script` : "not waited on"}.`
     );
   }
 });

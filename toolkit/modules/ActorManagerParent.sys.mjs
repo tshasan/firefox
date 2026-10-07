@@ -323,7 +323,9 @@ let JSWINDOWACTORS = {
           ]
         : []),
     ],
-    messageManagerGroups: ["browsers"],
+    // "headless-browsers" lets PageExtractor learn that a page it loads in
+    // the background is behind a captcha.
+    messageManagerGroups: ["browsers", "headless-browsers"],
     allFrames: true,
     enablePreference: "captchadetection.actor.enabled",
     safeForUntrustedWebProcess: true,
