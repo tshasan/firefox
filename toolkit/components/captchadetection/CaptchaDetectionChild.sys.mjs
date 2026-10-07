@@ -5,6 +5,11 @@
 /** @type {lazy} */
 const lazy = {};
 
+ChromeUtils.defineESModuleGetters(lazy, {
+  captchaTypeForURI:
+    "moz-src:///toolkit/components/captchadetection/CaptchaFrames.sys.mjs",
+});
+
 ChromeUtils.defineLazyGetter(lazy, "console", () => {
   return console.createInstance({
     prefix: "CaptchaDetectionChild",
@@ -114,11 +119,8 @@ class GoogleRecaptchaV2Handler extends CaptchaHandler {
     }
 
     return (
-      [
-        "https://www.google.com/recaptcha/api2/",
-        "https://www.google.com/recaptcha/enterprise/",
-      ].some(match => document.location.href.startsWith(match)) &&
-      !document.location.search.includes("size=invisible")
+      lazy.captchaTypeForURI(document.documentURIObject) ===
+      GoogleRecaptchaV2Handler.type
     );
   }
 
@@ -197,12 +199,6 @@ class CFTurnstileHandler extends CaptchaHandler {
     });
   }
 
-  // "f/av0/rch" is the widget frame Cloudflare serves as of October 2026;
-  // "if/ov2/av0/rcv" is its predecessor.
-  static matchesRegex = new RegExp(
-    "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/.+?/turnstile/(if/ov2/av0/rcv|f/av0/rch)/"
-  );
-
   static matches(document) {
     if (Cu.isInAutomation) {
       return (
@@ -212,7 +208,10 @@ class CFTurnstileHandler extends CaptchaHandler {
       );
     }
 
-    return CFTurnstileHandler.matchesRegex.test(document.location.href);
+    return (
+      lazy.captchaTypeForURI(document.documentURIObject) ===
+      CFTurnstileHandler.type
+    );
   }
 
   #mutationHandler(_mutations, observer) {
@@ -323,8 +322,9 @@ class DatadomeHandler extends CaptchaHandler {
       );
     }
 
-    return document.location.href.startsWith(
-      "https://geo.captcha-delivery.com/captcha/"
+    return (
+      lazy.captchaTypeForURI(document.documentURIObject) ===
+      DatadomeHandler.type
     );
   }
 }
@@ -377,12 +377,8 @@ class HCaptchaHandler extends CaptchaHandler {
     }
 
     return (
-      document.location.href.startsWith(
-        "https://newassets.hcaptcha.com/captcha/v1/"
-      ) &&
-      document.location.pathname.endsWith("/static/hcaptcha.html") &&
-      !document.location.hash.includes("size=invisible") &&
-      !document.location.hash.includes("frame=checkbox-invisible")
+      lazy.captchaTypeForURI(document.documentURIObject) ===
+      HCaptchaHandler.type
     );
   }
 
@@ -475,8 +471,9 @@ class ArkoseLabsHandler extends CaptchaHandler {
       );
     }
 
-    return document.location.href.startsWith(
-      "https://client-api.arkoselabs.com/fc/assets/ec-game-core/game-core/"
+    return (
+      lazy.captchaTypeForURI(document.documentURIObject) ===
+      ArkoseLabsHandler.type
     );
   }
 }
@@ -506,6 +503,11 @@ export class CaptchaDetectionChild extends JSWindowActorChild {
    * @param {Event} event - The event that created the actor.
    */
   #initCaptchaHandler(event) {
+    // A widget is always a frame inside the page it guards. A page at a
+    // widget's address, such as a provider's demo page, is not one.
+    if (!this.browsingContext.parent) {
+      return;
+    }
     for (const handler of CaptchaDetectionChild.#handlers) {
       if (handler.matches(this.document)) {
         this.handler = new handler(this, event);

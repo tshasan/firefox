@@ -9,6 +9,7 @@ MOZ_SRC_FILES += [
     "CaptchaDetectionChild.sys.mjs",
     "CaptchaDetectionCommunicationChild.sys.mjs",
     "CaptchaDetectionParent.sys.mjs",
+    "CaptchaFrames.sys.mjs",
 ]
 
 MOZ_SRC_FILES += [
@@ -16,6 +17,7 @@ MOZ_SRC_FILES += [
     "CaptchaResponseObserver.sys.mjs",
 ]
 
+BROWSER_CHROME_MANIFESTS += ["tests/browser/browser.toml"]
 MOCHITEST_MANIFESTS += ["tests/mochitest/mochitest.toml"]
 
 SPHINX_TREES["captcha-detection"] = "docs"
