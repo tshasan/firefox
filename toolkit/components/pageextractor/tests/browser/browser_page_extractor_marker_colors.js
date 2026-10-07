@@ -113,6 +113,17 @@ add_task(async function test_page_extractor_marker_colors() {
   is(successMarker.color, "blue", "Success renders blue.");
   is(hiddenMarker.color, "yellow", "A handled outcome renders yellow.");
   is(errorMarker.color, "red", "An error renders red.");
+  is(successMarker.outcome, "done", "A success says it is done.");
+  is(
+    hiddenMarker.outcome,
+    "page is in a background tab",
+    "A handled outcome says what happened in plain words."
+  );
+  is(
+    errorMarker.outcome,
+    "failed with TimeoutError",
+    "An error names the error."
+  );
 
   const path = PathUtils.join(
     PathUtils.tempDir,

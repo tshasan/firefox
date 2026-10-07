@@ -12,9 +12,10 @@ function ensureSchemaRegistered() {
 
   ChromeUtils.registerMarkerSchema({
     name: "PageExtractor",
-    tooltipLabel: "{marker.data.phaseLabel}",
-    tableLabel: "{marker.data.process}: {marker.data.phaseLabel}",
-    chartLabel: "{marker.data.phaseLabel}",
+    tooltipLabel: "{marker.data.phaseLabel}: {marker.data.outcome}",
+    tableLabel:
+      "{marker.data.process}: {marker.data.phaseLabel}: {marker.data.outcome}",
+    chartLabel: "{marker.data.phaseLabel}: {marker.data.outcome}",
     display: ["marker-chart", "marker-table"],
     colorField: "color",
     data: [
@@ -22,6 +23,12 @@ function ensureSchemaRegistered() {
       {
         key: "phaseLabel",
         label: "Description",
+        format: "string",
+        searchable: true,
+      },
+      {
+        key: "outcome",
+        label: "Outcome",
         format: "string",
         searchable: true,
       },
@@ -117,9 +124,39 @@ let nextId = 1;
 
 const DEFAULT_MARKER_COLOR = "blue";
 // Statuses other than "success" or "error" (e.g. "unavailable",
-// "document-hidden", "empty") are handled outcomes, not thrown exceptions.
+// "document-hidden", "empty") are outcomes a caller handles, not exceptions
+// nobody expected.
 const HANDLED_OUTCOME_MARKER_COLOR = "yellow";
 const ERROR_MARKER_COLOR = "red";
+
+/**
+ * Describes statuses that need no other data, for a profile's reader.
+ *
+ * @type {Map<string, string>}
+ */
+const STATUS_DESCRIPTIONS = new Map([
+  ["success", "done"],
+  ["empty", "no text found"],
+  ["unavailable", "can't be read"],
+  ["document-hidden", "page is in a background tab"],
+  ["not-readerable", "Reader Mode declined, read as is"],
+  ["document-unloaded", "page replaced before it was ready"],
+  ["browser-closed", "browser closed before the page was ready"],
+]);
+
+/**
+ * The outcome of a phase in plain language, for a profile's reader.
+ *
+ * @param {Record<string, any>} data - The marker's data, once finished.
+ * @returns {string}
+ */
+function describeOutcome(data) {
+  switch (data.status) {
+    case "error":
+      return `failed with ${data.errorName ?? "an error"}`;
+  }
+  return STATUS_DESCRIPTIONS.get(data.status) ?? data.status;
+}
 
 let submissionScheduled = false;
 
@@ -363,6 +400,7 @@ export class PageExtractorEvent {
     } else {
       this.#data.color = HANDLED_OUTCOME_MARKER_COLOR;
     }
+    this.#data.outcome = describeOutcome(this.#data);
     const formatted = this.#options ? formatOptions(this.#options) : "";
     if (formatted) {
       this.#data.options = formatted;

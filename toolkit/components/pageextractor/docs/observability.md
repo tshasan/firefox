@@ -19,11 +19,11 @@ connects work across processes and between profiler and telemetry data.
 2. Run the extraction.
 3. Look for `PageExtractor #n` tracks in the marker chart.
 
-Markers are blue for success, red for thrown errors, and yellow for handled
-outcomes such as unavailable or empty content. The marker details name the
-stage and strategy that produced the outcome. In a hidden browser, pass the
-callback's `traceId` into `getText` so loading and extraction stay in the same
-flow.
+Markers are blue for success, red for unexpected errors, and yellow for outcomes
+the caller handles, such as unavailable or empty content. Each marker's label
+says what happened in plain words, and its details name the stage and strategy
+that produced the outcome. In a hidden browser, pass the callback's `traceId`
+into `getText` so loading and extraction stay in the same flow.
 
 [Instrumenting JavaScript](/tools/profiler/instrumenting-javascript.md) explains
 the profiler mechanism.
