@@ -1,0 +1,176 @@
+{
+  "0415": [
+    {
+      "question": "When was UTF-8 introduced?",
+      "evidence": ["introduced in 1989"]
+    },
+    {
+      "question": "What does case-folding enable?",
+      "evidence": ["case-insensitive comparisons"]
+    },
+    {
+      "question": "Which Arm SIMD technology does the author plan to target?",
+      "evidence": ["NEON will be the main target"]
+    }
+  ],
+  "0505": {
+    "notes": "This saved Discourse page requires client hydration. Its static replay produces empty output in all three modes; missing evidence can reflect replay limitations rather than extractor quality.",
+    "qa": [
+      {
+        "question": "Which root does the requested longer chain use?",
+        "evidence": ["preferred chain = DST Root CA X3"]
+      },
+      {
+        "question": "When does provision of the longer cross-signed chain end?",
+        "evidence": [
+          "June 6th, 2024",
+          "stop providing the longer cross-signed chain entirely"
+        ]
+      },
+      {
+        "question": "Which ACME client does the questioner use?",
+        "evidence": ["Lego ACME client"]
+      }
+    ]
+  },
+  "3065": [
+    {
+      "question": "Which chipset powers this phone?",
+      "evidence": ["Snapdragon® 8 Elite"]
+    },
+    {
+      "question": "Which water resistance ratings does the phone have?",
+      "evidence": ["IP69", "IP68"]
+    },
+    {
+      "question": "Which wired and wireless charging powers are advertised?",
+      "evidence": ["80W SUPERVOOC", "50W AIRVOOC"]
+    }
+  ],
+  "0597": [
+    {
+      "question": "When and where was Hakutsuru founded?",
+      "evidence": ["1743", "Nada district", "Kobe"]
+    },
+    {
+      "question": "Which bird inspired the brand's name?",
+      "evidence": ["white crane"]
+    },
+    {
+      "question": "What is the brand's proprietary sake rice called?",
+      "evidence": ["Hakutsuru Nishiki"]
+    }
+  ],
+  "1371": [
+    {
+      "question": "What is included with every shoe rental?",
+      "evidence": ["Complimentary socks are included with every shoe rental"]
+    },
+    {
+      "question": "What does Classic Black Tie cost with a rental package?",
+      "evidence": ["Classic Black Tie", "With Rental Package", "$20.00"]
+    },
+    {
+      "question": "Which mandatory fee is excluded from the a la carte price?",
+      "evidence": ["mandatory $12 damage and handling fee"]
+    }
+  ],
+  "0682": [
+    {
+      "question": "How does sudo limit privilege elevation?",
+      "evidence": ["temporary privilege elevation to a single command"]
+    },
+    {
+      "question": "Which main configuration file does sudo use?",
+      "evidence": ["/etc/sudoers"]
+    },
+    {
+      "question": "Where is the standalone sudo-rs TOML configuration stored?",
+      "evidence": ["/etc/sudo-rs/config.toml"]
+    }
+  ],
+  "4764": [
+    {
+      "question": "When was Glossier launched?",
+      "evidence": ["launched Glossier in 2014"]
+    },
+    {
+      "question": "Which website preceded Glossier?",
+      "evidence": ["Into The Gloss"]
+    },
+    {
+      "question": "What is Glossier's skincare and makeup philosophy?",
+      "evidence": ["Skin First. Makeup Second"]
+    }
+  ],
+  "0162": [
+    {
+      "question": "What technical field does ASU's GIT degree focus on?",
+      "evidence": ["focuses on technical web development"]
+    },
+    {
+      "question": "What does the graphic design degree center on?",
+      "evidence": ["visual communication and storytelling"]
+    },
+    {
+      "question": "Which museum has employed exhibit design graduates?",
+      "evidence": ["Chicago Design Museum"]
+    }
+  ],
+  "4087": [
+    {
+      "question": "How long is the questioner's proposed Japan trip?",
+      "evidence": ["15 to 18 days"]
+    },
+    {
+      "question": "Which company organized a respondent's 22-day trip?",
+      "evidence": ["22 day trip to Japan through Inside Japan"]
+    },
+    {
+      "question": "Which YouTube channel does a later respondent recommend?",
+      "evidence": ["Kensho Quest"]
+    }
+  ],
+  "3010": [
+    {
+      "question": "What does this category list?",
+      "evidence": ["individual programming languages"]
+    },
+    {
+      "question": "How many subcategories are listed in the snapshot?",
+      "evidence": ["59 subcategories"]
+    },
+    {
+      "question": "Are TypeScript and Zig present in the language listing?",
+      "evidence": ["TypeScript", "Zig (programming language)"]
+    }
+  ],
+  "0424": [
+    {
+      "question": "Who teaches Algorithms for Data Science?",
+      "evidence": ["Instructor: Sitan Chen"]
+    },
+    {
+      "question": "When and where does the class meet?",
+      "evidence": ["MW 2:15-3:30", "SEC LL2-224"]
+    },
+    {
+      "question": "What topic is scheduled for November 29?",
+      "evidence": ["Nov 29", "Diffusion models"]
+    }
+  ],
+  "2836": [
+    {
+      "question": "Which model providers are named for AI Gateway?",
+      "evidence": ["OpenAI, Anthropic, or Gemini"]
+    },
+    {
+      "question": "Which two storage products are described?",
+      "evidence": ["Netlify DB", "Blobs"]
+    },
+    {
+      "question": "Does Netlify Forms require extra API calls or JavaScript?",
+      "evidence": ["without extra API calls or additional JavaScript"]
+    }
+  ]
+}

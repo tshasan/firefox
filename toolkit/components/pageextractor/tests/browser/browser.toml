@@ -5,9 +5,13 @@ prefs = [
 support-files = [
   "client_redirect.sjs",
   "head.js",
+  "head_salience.js",
   "page.pdf",
   "redirect_target.html",
   "redirect_to.sjs",
+  "salience_corpus.json",
+  "salience_real/corpus.json",
+  "salience_real/*.html.gz",
 ]
 
 ["browser_anonymous_headless_extractor.js"]
@@ -27,6 +31,14 @@ support-files = [
 ["browser_page_extractor_markers.js"]
 
 ["browser_page_metadata.js"]
+
+["browser_salience_benchmark.js"]
+
+["browser_salience_extractor.js"]
+
+["browser_salience_real_benchmark.js"]
+
+["browser_salience_sections.js"]
 
 ["browser_viewport_extractor.js"]
 

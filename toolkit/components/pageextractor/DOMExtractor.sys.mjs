@@ -21,7 +21,7 @@ const lazy = XPCOMUtils.declareLazy({
     "moz-src:///toolkit/components/pageextractor/YouTubeExtraction.sys.mjs",
 });
 
-const WHITESPACE_REGEX = /\s+/g;
+export const WHITESPACE_REGEX = /\s+/g;
 const HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6";
 const LINK_TARGET_LENGTH = 40;
 const MARKDOWN_TEXT_ESCAPE_REGEX = /[\[\]()]/g;
@@ -761,7 +761,7 @@ export function extractTextFromDOM(document, rootNode, options) {
 /**
  * Tags excluded from text extraction.
  */
-const CONTENT_EXCLUDED_TAGS = new Set([
+export const CONTENT_EXCLUDED_TAGS = new Set([
   // TODO - We should add this and write some tests.
   "CODE",
 
@@ -816,7 +816,7 @@ function getShadowRoot(node) {
  * @param {string} url
  * @returns {string}
  */
-function escapeMarkdownLink(text, url) {
+export function escapeMarkdownLink(text, url) {
   const escapedText = text.replace(MARKDOWN_TEXT_ESCAPE_REGEX, "\\$&");
   const escapedHref = url
     .replace(OPEN_PAREN_REGEX, "%28")

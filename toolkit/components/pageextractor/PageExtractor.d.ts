@@ -35,6 +35,10 @@ export type GetTextOptions = Partial<{
   // keep their text but lose their target, and whitespace within a block
   // collapses to single spaces. Paragraph breaks between blocks are preserved.
   useSimpleText: boolean;
+  // Extract text from the rendered layout with the experimental
+  // SalienceExtractor. Overrides removeBoilerplate, and ignores
+  // includeCanvasSnapshots and site strategies.
+  useSalienceExtractor: boolean;
 }>;
 
 export type CanvasSnapshot = {

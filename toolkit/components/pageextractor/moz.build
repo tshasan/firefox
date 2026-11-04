@@ -5,6 +5,7 @@
 SPHINX_TREES["/toolkit/components/pageextractor"] = "docs"
 
 BROWSER_CHROME_MANIFESTS += ["tests/browser/browser.toml"]
+PYTHON_UNITTEST_MANIFESTS += ["tests/python.toml"]
 
 FINAL_TARGET_FILES.actors += [
     "PageExtractorChild.sys.mjs",
@@ -14,6 +15,9 @@ FINAL_TARGET_FILES.actors += [
 MOZ_SRC_FILES += [
     "DOMExtractor.sys.mjs",
     "PageExtractorEvents.sys.mjs",
+    "SalienceExtractor.sys.mjs",
+    "SalienceSelection.sys.mjs",
+    "SalienceSemantics.sys.mjs",
     "YouTubeExtraction.sys.mjs",
 ]
 

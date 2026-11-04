@@ -64,8 +64,8 @@ page_extractor:
         type: string
         description: >
           The extraction/load strategy used, e.g. "dom", "pdf", "reader",
-          "youtube-dom", "youtube-transcript", "about-reader", "headless",
-          "headless-anonymous". Omitted when not applicable to this phase.
+          "youtube-dom", "youtube-transcript", "about-reader", "salience",
+          "headless", "headless-anonymous". Omitted when not applicable to this phase.
       site_strategy:
         type: string
         description: >

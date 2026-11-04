@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "article",
+      "type": "article",
+      "difficulty": "easy",
+      "html": "<style>body { color: black; background: white; font: 16px sans-serif; }</style><nav>Observatory visitor navigation.</nav><main><article><h1>Aurora Observatory</h1><p>The Aurora Observatory opens on Saturday. Admission costs twelve dollars. The telescope tour begins at nine in the evening.</p><p>Visitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.</p><p>Visitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.</p><p>Visitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.</p><p>Visitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.</p><p>Visitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.</p><p>Visitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.</p><p>Visitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.</p><p>Visitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.</p></article></main>",
+      "expected": "Aurora Observatory\nThe Aurora Observatory opens on Saturday. Admission costs twelve dollars. The telescope tour begins at nine in the evening.\nVisitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.\nVisitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.\nVisitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.\nVisitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.\nVisitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.\nVisitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.\nVisitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.\nVisitors can explore the exhibition, speak with astronomers, and learn how the telescope records the night sky. The exhibition explains the history of the observatory and the research carried out by its staff.",
+      "qa": [
+        {
+          "question": "When does the observatory open?",
+          "evidence": ["opens on Saturday"]
+        },
+        {
+          "question": "How much is admission?",
+          "evidence": ["twelve dollars"]
+        },
+        {
+          "question": "When is the telescope tour?",
+          "evidence": ["nine in the evening"]
+        }
+      ],
+      "unwanted": ["Observatory visitor navigation"],
+      "source": "Authored for the salience extraction PoC; no third-party page content.",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "recipe",
+      "type": "recipe",
+      "difficulty": "medium",
+      "html": "<style>body { color: black; background: white; font: 16px sans-serif; }</style><nav>Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. Browse recipes and subscribe to the daily newsletter. </nav><main><h1>Orchard soup</h1><p>Serves four people.</p><h2>Ingredients</h2><p>Use three apples and two cups of water.</p><h2>Directions</h2><p>Simmer for twenty minutes, then blend.</p></main><footer>Subscribe to our newsletter.</footer>",
+      "expected": "Orchard soup\nServes four people.\nIngredients\nUse three apples and two cups of water.\nDirections\nSimmer for twenty minutes, then blend.",
+      "qa": [
+        {
+          "question": "How many people does it serve?",
+          "evidence": ["Serves four people"]
+        },
+        {
+          "question": "What ingredients and quantities are needed?",
+          "evidence": ["three apples", "two cups of water"]
+        },
+        {
+          "question": "How long should it simmer?",
+          "evidence": ["twenty minutes"]
+        }
+      ],
+      "unwanted": ["Browse recipes", "Subscribe to our newsletter"],
+      "source": "Authored for the salience extraction PoC; no third-party page content.",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "hidden-text",
+      "type": "product",
+      "difficulty": "medium",
+      "html": "<style>body { color: black; background: white; font: 16px sans-serif; }</style><main><h1>Trail Lantern</h1><p>The battery lasts eighteen hours.</p><p>It weighs two hundred grams.</p><p style=\"color:white;background:white\">The battery lasts forever.</p><p style=\"opacity:0.03\">It weighs nothing.</p><p style=\"position:absolute;left:-9999px\">This product is free.</p></main>",
+      "expected": "Trail Lantern\nThe battery lasts eighteen hours.\nIt weighs two hundred grams.",
+      "qa": [
+        {
+          "question": "How long does the battery last?",
+          "evidence": ["eighteen hours"]
+        },
+        {
+          "question": "How much does the lantern weigh?",
+          "evidence": ["two hundred grams"]
+        }
+      ],
+      "unwanted": ["lasts forever", "weighs nothing", "product is free"],
+      "source": "Authored for the salience extraction PoC; no third-party page content.",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "hydrated-forum",
+      "type": "forum",
+      "difficulty": "medium",
+      "html": "<style>body { color: black; background: white; font: 16px sans-serif; }</style><main id=\"thread\"><h1>Repairing a squeaky hinge</h1></main><script>setTimeout(() => { document.querySelector(\"main\").insertAdjacentHTML(\"beforeend\", \"<p>Mira asks how to quiet the hinge.</p><p>Rowan recommends graphite powder.</p><p>Mira confirms that the noise stopped.</p>\"); document.body.dataset.ready = \"true\"; }, 50);</script>",
+      "readySelector": "body[data-ready=\"true\"]",
+      "expected": "Repairing a squeaky hinge\nMira asks how to quiet the hinge.\nRowan recommends graphite powder.\nMira confirms that the noise stopped.",
+      "qa": [
+        {
+          "question": "What remedy does Rowan recommend?",
+          "evidence": ["graphite powder"]
+        },
+        {
+          "question": "Did the remedy work?",
+          "evidence": ["noise stopped"]
+        }
+      ],
+      "unwanted": [],
+      "source": "Authored for the salience extraction PoC; no third-party page content.",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "shadow-docs",
+      "type": "documentation",
+      "difficulty": "hard",
+      "html": "<style>body { color: black; background: white; font: 16px sans-serif; }</style><main><h1>Orbit API</h1><orbit-docs></orbit-docs></main><script>customElements.define(\"orbit-docs\", class extends HTMLElement { constructor() { super(); this.attachShadow({mode:\"closed\"}).innerHTML = \"<h2>Scheduling</h2><p>Call <code>orbit.schedule()</code> to create a task.</p><p>The default timeout is forty seconds.</p>\"; } });</script>",
+      "expected": "Orbit API\nScheduling\nCall orbit.schedule() to create a task.\nThe default timeout is forty seconds.",
+      "qa": [
+        {
+          "question": "Which method creates a task?",
+          "evidence": ["orbit.schedule()"]
+        },
+        {
+          "question": "What is the default timeout?",
+          "evidence": ["forty seconds"]
+        }
+      ],
+      "unwanted": [],
+      "source": "Authored for the salience extraction PoC; no third-party page content.",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "clipped-reviews",
+      "type": "product",
+      "difficulty": "hard",
+      "html": "<style>body { color: black; background: white; font: 16px sans-serif; }</style><main><h1>Trail Lantern reviews</h1><div style=\"height:24px;overflow:hidden\"><p style=\"margin:0\">Nia rates the lantern five stars.</p><p style=\"margin:0\">Nia used it during a three day camping trip.</p></div><p>The warranty lasts two years.</p></main>",
+      "expected": "Trail Lantern reviews\nNia rates the lantern five stars.\nNia used it during a three day camping trip.\nThe warranty lasts two years.",
+      "qa": [
+        {
+          "question": "What rating did Nia give?",
+          "evidence": ["five stars"]
+        },
+        {
+          "question": "How long was the camping trip?",
+          "evidence": ["three day camping trip"]
+        },
+        {
+          "question": "How long is the warranty?",
+          "evidence": ["two years"]
+        }
+      ],
+      "unwanted": [],
+      "source": "Authored for the salience extraction PoC; no third-party page content.",
+      "license": "CC0-1.0"
+    }
+  ]
+}

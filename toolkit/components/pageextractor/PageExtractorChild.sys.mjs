@@ -30,6 +30,8 @@ const lazy = XPCOMUtils.declareLazy({
   ReaderMode: "moz-src:///toolkit/components/reader/ReaderMode.sys.mjs",
   extractTextFromDOM:
     "moz-src:///toolkit/components/pageextractor/DOMExtractor.sys.mjs",
+  extractSalientText:
+    "moz-src:///toolkit/components/pageextractor/SalienceExtractor.sys.mjs",
   shouldExtractYouTube:
     "moz-src:///toolkit/components/pageextractor/YouTubeExtraction.sys.mjs",
   getYouTubeContent:
@@ -464,9 +466,11 @@ export class PageExtractorChild extends JSWindowActorChild {
             event.finish({ status: "unavailable" });
             return null;
           }
-        } else if (options.removeBoilerplate) {
+        } else if (options.removeBoilerplate && !options.useSalienceExtractor) {
           // Boilerplate removal is requested. See if reader mode can be applied, and then
           // use that for boilerplate removal.
+          // The SalienceExtractor removes boilerplate from the rendered page
+          // itself, so it skips reader mode.
 
           if (
             (document && lazy.isProbablyReaderable(document)) ||
@@ -528,11 +532,18 @@ export class PageExtractorChild extends JSWindowActorChild {
 
         // All of the content gets extracted using the DOMExtractor, which
         // knows how to apply certain settings in GetTextOptions.
+        const extract = options.useSalienceExtractor
+          ? lazy.extractSalientText
+          : lazy.extractTextFromDOM;
+        if (options.useSalienceExtractor && strategy === "dom") {
+          strategy = "salience";
+          event.addData({ strategy });
+        }
         const extraction = await this.#trace(
           lazy.Phase.domExtract,
           { traceId: event.traceId, strategy },
-          domEvent => {
-            const result = lazy.extractTextFromDOM(document, rootNode, options);
+          async domEvent => {
+            const result = await extract(document, rootNode, options);
             domEvent.addData({
               textLength: result.text.length,
               linkCount: result.links.length,
