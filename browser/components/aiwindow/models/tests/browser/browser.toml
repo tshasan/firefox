@@ -42,5 +42,6 @@ prefs = [
 ["browser_title_generation.js"]
 ["browser_tools_get_page_content.js"]
 ["browser_tools_get_skill.js"]
+["browser_trace.js"]
 ["browser_utils_fxAccount.js"]
 ["browser_utils_records_cache.js"]

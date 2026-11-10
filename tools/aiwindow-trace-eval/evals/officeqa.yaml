@@ -1,0 +1,27 @@
+---
+schemaVersion: 1
+name: officeqa-smartwindow
+dataset:
+  manifest: ../../../artifacts/aiwindow-trace-eval/officeqa/manifest.json
+  cases: []
+model:
+  kind: custom
+  endpoint: http://127.0.0.1:8080/v1
+  model: ""
+  apiKeyEnv: ""
+  parameters:
+    max_tokens: 4096
+toolPolicy:
+  allowedTools: [get_open_tabs, get_page_content]
+  restrictUrlsToSources: true
+grader: officeqa
+limits:
+  cases: 10
+  repetitions: 1
+  runtimeSeconds: 3600
+  caseTimeoutSeconds: 120
+  modelCallsPerCase: 6
+  totalTokens: 2000000
+  maxCompletionTokens: 4096
+publish:
+  langfuse: auto

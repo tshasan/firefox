@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 from typing import Optional
@@ -94,6 +95,70 @@ class EvalCommand(MachCommandBase):
             return result
 
         return _dispatch_perftest(self._mach_context, test_path, extra_args)
+
+    @SubCommand(
+        "eval",
+        "smartwindow",
+        description="Run Smart Window dataset evaluations and report to Langfuse.",
+    )
+    @CommandArgument(
+        "--local",
+        action="store_true",
+        help="Start the local Langfuse and llama-server stack and publish to it.",
+    )
+    @CommandArgument(
+        "--stop",
+        action="store_true",
+        help="Stop the local stack started with --local and exit.",
+    )
+    @CommandArgument(
+        "run_args",
+        nargs=argparse.REMAINDER,
+        help="Arguments passed through to tools/aiwindow-trace-eval/run.py, "
+        "e.g. --config, --limit, --case, --open.",
+    )
+    def run_smartwindow_eval(self, local=False, stop=False, run_args=None):
+        tool_dir = Path(self.topsrcdir) / "tools" / "aiwindow-trace-eval"
+        # local_stack lives with the eval tool rather than in a mach virtualenv.
+        sys.path.insert(0, str(tool_dir))
+        import local_stack
+
+        if stop:
+            local_stack.down()
+            return 0
+        self.activate_virtualenv()
+        try:
+            self.virtualenv_manager.install_pip_requirements(
+                str(tool_dir / "requirements.txt"), require_hashes=False
+            )
+        except Exception as exception:
+            print(f"Failed to install Smart Window eval requirements: {exception}")
+            return 1
+        environment = dict(os.environ)
+        if local:
+            try:
+                environment.update(local_stack.up())
+            except (RuntimeError, subprocess.CalledProcessError, OSError) as error:
+                print(f"Could not start the local stack: {error}")
+                return 1
+
+        result = subprocess.run(
+            [
+                str(self.virtualenv_manager.python_path),
+                str(tool_dir / "run.py"),
+                *(run_args or []),
+            ],
+            cwd=self.topsrcdir,
+            env=environment,
+            check=False,
+        )
+        if local:
+            # Throwaway credentials of the loopback-only local stack.
+            print(
+                f"Langfuse: {local_stack.LANGFUSE_URL} "
+                f"(login {local_stack.USER_EMAIL} / {local_stack.USER_PASSWORD})"
+            )
+        return result.returncode
 
 
 def _get_fxa_token(mach_cmd):

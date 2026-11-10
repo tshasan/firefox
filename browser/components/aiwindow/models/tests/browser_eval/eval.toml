@@ -8,6 +8,7 @@ support-files = [
   "pages/mylocalweather.html",
   "prompts/basic_quality.sys.mjs",
   "tests/basic_quality.sys.mjs",
+  "tests/trace.sys.mjs",
 ]
 
 ["browser_eval_basic_quality_gemini25flashlite.js"]
@@ -15,3 +16,5 @@ support-files = [
 ["browser_eval_basic_quality_gptoss120b.js"]
 
 ["browser_eval_basic_quality_qwen3_235b_a22b_instruct2507.js"]
+
+["browser_eval_trace.js"]

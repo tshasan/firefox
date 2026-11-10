@@ -117,7 +117,7 @@ class EvalMetrics(Layer):
                 "name": metric_name,
                 "framework": {"name": "mozperftest"},
                 "results": str(eval_path),
-                "unit": metric_name,
+                "unit": results[0].get("unit", metric_name),
                 "lowerIsBetter": lower_is_better,
                 "shouldAlert": config.get("shouldAlert", False),
                 "value": summary_value,

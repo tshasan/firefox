@@ -10,3 +10,4 @@ ignore: |
   *node_modules*
   *bad.yml
   *pnpm-lock.yaml
+  **/aiwindow-trace-eval/local/docker-compose.yml

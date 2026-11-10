@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from abc import ABC, abstractmethod
 from typing import Any, Callable
@@ -29,6 +30,51 @@ class _Evaluation(ABC):
     def run(self, payloads: list[dict[str, Any]]) -> dict:
         """Run the evaluation and return a perftest metric result."""
         ...
+
+
+class RecordedScores(_Evaluation):
+    """Report scores computed during a browser eval, including score coverage."""
+
+    def run(self, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        metrics = {}
+        for payload in payloads:
+            if payload.get("error"):
+                raise ValueError(f"Evaluation execution failed: {payload['error']}")
+            names = [
+                score["name"]
+                for score in payload.get("scores", [])
+                + payload.get("unavailableScores", [])
+            ]
+            if len(names) != len(set(names)):
+                raise ValueError(f"Duplicate evaluation score in {names}")
+            for score in payload.get("scores", []):
+                name = score["name"]
+                value = score.get("score")
+                if "error" in score:
+                    raise ValueError(f"Evaluation {name} failed: {score['error']}")
+                if type(value) not in (int, float) or not math.isfinite(value):
+                    raise ValueError(f"Evaluation {name} has a non-numeric score")
+                metrics.setdefault(name, []).append(value)
+            for score in payload.get("unavailableScores", []):
+                metrics.setdefault(score["name"], [])
+        if not metrics:
+            raise ValueError("No recorded evaluation scores were produced")
+        results = []
+        for name, values in sorted(metrics.items()):
+            if values:
+                results.append({
+                    "name": name,
+                    "values": values,
+                    "unit": "score",
+                    "lowerIsBetter": False,
+                })
+            results.append({
+                "name": f"{name}_coverage",
+                "values": [len(values) / len(payloads)],
+                "unit": "ratio",
+                "lowerIsBetter": False,
+            })
+        return results
 
 
 class _LlmJudge(_Evaluation):

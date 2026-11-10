@@ -988,3 +988,95 @@ add_task(async function test_abort_during_tool_stops_batch() {
     );
   }
 });
+
+add_task(async function test_tool_policy_limits_tools_and_urls() {
+  await withToolCallFixture(
+    async ({
+      url,
+      mockEngineManager,
+      createConversation,
+      fetchWithHistory,
+      captureChatRequest,
+    }) => {
+      Services.fog.testResetFOG();
+      const pageContentSpy = sinon.spy(GetPageContent, "getPageContentText");
+      const allowedTools = [GET_OPEN_TABS, GET_PAGE_CONTENT];
+      try {
+        const unrestricted = await createConversation();
+        const unrestrictedFetch = fetchWithHistory(unrestricted);
+        const unrestrictedTurn = await captureChatRequest();
+        Assert.ok(
+          unrestrictedTurn.request.tools.some(
+            tool => tool.function.name === GET_USER_MEMORIES
+          ),
+          "Without a policy, tools outside the allow list are offered"
+        );
+        unrestrictedTurn.respond("No tools needed.");
+        await unrestrictedFetch;
+
+        const conversation = await createConversation();
+        const fetchPromise = fetchWithHistory(conversation, {
+          toolPolicy: { allowedTools, allowedUrls: [url] },
+        });
+        const firstTurn = await captureChatRequest();
+        Assert.deepEqual(
+          firstTurn.request.tools.map(tool => tool.function.name).toSorted(),
+          allowedTools.toSorted(),
+          "Only the allowed tools are offered to the model"
+        );
+        firstTurn.respond({
+          text: "",
+          toolCalls: [
+            makeToolCall("call_memories", GET_USER_MEMORIES),
+            makeToolCall(
+              "call_other_page",
+              GET_PAGE_CONTENT,
+              JSON.stringify({ url_list: ["https://example.com/"] })
+            ),
+            pageCall(),
+          ],
+        });
+
+        const followupTurn = await captureChatRequest();
+        followupTurn.respond("I read the supplied article.");
+        await fetchPromise;
+        mockEngineManager.assertAllRequestsHandled();
+
+        const toolBody = callId =>
+          conversation.messages.find(
+            m =>
+              m.role === MESSAGE_ROLE.TOOL && m.content.tool_call_id === callId
+          ).content.body;
+        Assert.equal(
+          toolBody("call_memories"),
+          `Tool ${GET_USER_MEMORIES} is unavailable for this turn.`,
+          "A tool outside the allow list is rejected even when the model calls it"
+        );
+        Assert.equal(
+          toolBody("call_other_page"),
+          "Only the supplied source URLs may be read in this turn.",
+          "A URL outside the allow list is rejected"
+        );
+        Assert.ok(
+          toolBody("call_page").some(text => text.includes(PAGE_TEXT)),
+          "The allowed URL is read from the real page"
+        );
+        Assert.ok(
+          pageContentSpy.calledOnce,
+          "Only the allowed URL reaches page extraction"
+        );
+        Assert.deepEqual(
+          getToolCallEvents(),
+          [
+            [GET_USER_MEMORIES, "tool_not_allowed"],
+            [GET_PAGE_CONTENT, "url_not_allowed"],
+            [GET_PAGE_CONTENT, ""],
+          ].sort(),
+          "Each rejection records its own tool_call error"
+        );
+      } finally {
+        pageContentSpy.restore();
+      }
+    }
+  );
+});

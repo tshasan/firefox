@@ -703,9 +703,10 @@ export function getTabList(amount = MAX_TABS) {
  * @param {string} [toolParams.topic] - Optional. If specified, tabs are ranked by
  *   similarity between the topic and each tab's title.
  * @param {ChatConversation} conversation
+ * @param {?TraceSpan} [trace] - The parent tool span for local development tracing.
  * @returns {Promise<Array<TabInfo>>}
  */
-export async function getOpenTabs({ topic = "" } = {}, conversation) {
+export async function getOpenTabs({ topic = "" } = {}, conversation, trace) {
   // No security check needed. The security checks prevent data exfiltration,
   // which requires external communication. This tool makes no external requests.
 
@@ -715,6 +716,7 @@ export async function getOpenTabs({ topic = "" } = {}, conversation) {
 
   if (topic) {
     const rankStart = ChromeUtils.now(); // for profiling topic-based ranking
+    const rankSpan = trace?.child("get_open_tabs.rank", "CHAIN", { topic });
     try {
       const titles = tabs.map(t =>
         SmartTabGroupingManager.preprocessText(t.title || "")
@@ -740,6 +742,7 @@ export async function getOpenTabs({ topic = "" } = {}, conversation) {
       scored.sort((a, b) => b.score - a.score);
       tabs.length = 0;
       tabs.push(...scored.map(s => s.tab));
+      rankSpan?.end(tabs);
 
       ChromeUtils.addProfilerMarker(
         "SmartWindow",
@@ -747,6 +750,7 @@ export async function getOpenTabs({ topic = "" } = {}, conversation) {
         `Tool:get_open_tabs:rank(n=${tabs.length})`
       );
     } catch (e) {
+      rankSpan?.end(undefined, e);
       lazy.console.warn("[Tool] getOpenTabs topic embedding failed", e);
     }
   }
@@ -1121,12 +1125,14 @@ export class GetPageContent {
    * @param {string[]} toolParams.url_list
    * @param {AbortSignal} [toolParams.signal]
    * @param {ChatConversation} conversation
+   * @param {?TraceSpan} [trace] - The parent tool span for local development tracing.
    * @returns {Promise<Array<string>>}
    */
-  static async getPageContentText(toolParams, conversation) {
+  static async getPageContentText(toolParams, conversation, trace) {
     const results = await GetPageContent.getPageContent(
       toolParams,
-      conversation
+      conversation,
+      trace
     );
     return results.map(result => result.content);
   }
@@ -1145,11 +1151,13 @@ export class GetPageContent {
    *   (and tears down any headless browser) when it aborts.
    * @param {number} [toolParams.settleDelayMs] - Extra wait for headless loads.
    * @param {ChatConversation} conversation
+   * @param {?TraceSpan} [trace] - The parent tool span for local development tracing.
    * @returns {Promise<Array<{url: ?string, ok: boolean, content: string}>>}
    */
   static async getPageContent(
     { url_list, signal, settleDelayMs },
-    conversation
+    conversation,
+    trace
   ) {
     // Sanitize the inputs from the language model:
     if (!Array.isArray(url_list)) {
@@ -1186,6 +1194,9 @@ export class GetPageContent {
           return { url, ok: false, content: "This URL is not allowed: " + url };
         }
         const startTime = ChromeUtils.now();
+        const pageSpan = trace?.child("get_page_content.read", "CHAIN", {
+          url,
+        });
         try {
           const { ok, content } =
             await GetPageContent.#getPageContentsForSingleURL(
@@ -1195,6 +1206,10 @@ export class GetPageContent {
               signal,
               settleDelayMs
             );
+          pageSpan?.end(
+            { url, ok, content },
+            ok ? null : new Error("Page read failed")
+          );
           ChromeUtils.addProfilerMarker(
             "SmartWindow",
             { startTime },
@@ -1202,6 +1217,7 @@ export class GetPageContent {
           );
           return { url, ok, content };
         } catch (error) {
+          pageSpan?.end(undefined, error);
           if (signal?.aborted) {
             return {
               url,

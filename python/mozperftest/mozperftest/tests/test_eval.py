@@ -1,5 +1,6 @@
 import json
 import shutil
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -11,6 +12,92 @@ from mozperftest.metrics.exceptions import (
     EvalMetricsPayloadError,
 )
 from mozperftest.tests.support import get_running_env
+from mozperftest.utils import load_class_from_path
+
+
+@pytest.fixture
+def recorded_scores():
+    evaluator = load_class_from_path(
+        "RecordedScores",
+        Path(__file__).resolve().parents[4] / "toolkit/components/ml/eval/evals.py",
+    )
+    return evaluator(lambda message: None, {})
+
+
+def test_recorded_scores_preserves_failures_and_score_coverage(recorded_scores):
+    results = recorded_scores.run([
+        {
+            "scores": [{"name": "accuracy", "score": 0}],
+            "unavailableScores": [{"name": "groundedness", "reason": "No evidence"}],
+        },
+        {
+            "scores": [
+                {"name": "accuracy", "score": 1},
+                {"name": "groundedness", "score": 0},
+            ],
+        },
+    ])
+    metrics = {result["name"]: result for result in results}
+    assert metrics["accuracy"]["values"] == [0, 1]
+    assert metrics["accuracy_coverage"]["values"] == [1.0]
+    assert metrics["groundedness"]["values"] == [0]
+    assert metrics["groundedness_coverage"]["values"] == [0.5]
+    assert all(result["lowerIsBetter"] is False for result in results)
+
+
+def test_recorded_scores_reports_all_unavailable(recorded_scores):
+    assert recorded_scores.run([
+        {"scores": [], "unavailableScores": [{"name": "groundedness"}]}
+    ]) == [
+        {
+            "name": "groundedness_coverage",
+            "values": [0.0],
+            "unit": "ratio",
+            "lowerIsBetter": False,
+        }
+    ]
+
+
+def test_recorded_scores_metrics_use_short_measurement_units(tmp_path):
+    mach_cmd, metadata, env = eval_metrics_running_env(tests=[], output=str(tmp_path))
+    metadata.script = {"options": {"default": {"evaluations": {"RecordedScores": {}}}}}
+    metadata.add_eval_payload(
+        "test.js", [{"scores": [{"name": "extraction_coverage", "score": 1}]}]
+    )
+    try:
+        result = env.layers[METRICS].layers[0].run(metadata)
+        units = {metric["name"]: metric["unit"] for metric in result.get_results()}
+        assert units == {
+            "extraction_coverage": "score",
+            "extraction_coverage_coverage": "ratio",
+        }
+    finally:
+        shutil.rmtree(mach_cmd._mach_context.state_dir)
+
+
+@pytest.mark.parametrize(
+    "payloads",
+    [
+        [],
+        [{"error": "Timeout"}],
+        [{"scores": [{"name": "accuracy", "error": "Scorer unavailable"}]}],
+        [
+            {
+                "scores": [
+                    {"name": "accuracy", "score": 1},
+                    {"name": "accuracy", "score": 0},
+                ]
+            }
+        ],
+    ]
+    + [
+        [{"scores": [{"name": "accuracy", "score": value}]}]
+        for value in (True, "1", None, float("nan"), float("inf"))
+    ],
+)
+def test_recorded_scores_rejects_invalid_results(recorded_scores, payloads):
+    with pytest.raises(ValueError):
+        recorded_scores.run(payloads)
 
 
 def eval_metrics_running_env(**kw):

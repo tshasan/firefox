@@ -45,6 +45,7 @@ import { getSmartPageName } from "chrome://browser/content/aiwindow/modules/Trus
  * @param {ChatConversation} conversation - The conversation context
  * @param {BrowsingContext} browsingContext - The browsing context (can be null for some tools)
  * @param {string} mode - The mode of operation (e.g., "fullpage", "sidebar", "urlbar")
+ * @param {?TraceSpan} [trace] - The parent tool span for local development tracing.
  * @returns {Promise<object>} The result of the tool execution, or
  *   `{ toolResult, cardShown }` for manage_tabs
  * @private
@@ -55,7 +56,8 @@ export async function executeToolByName(
   toolCallId,
   conversation,
   browsingContext,
-  mode
+  mode,
+  trace
 ) {
   let result;
   switch (toolName) {
@@ -63,7 +65,8 @@ export async function executeToolByName(
       const startTime = new Date();
       result = await GetPageContent.getPageContentText(
         toolParams,
-        conversation
+        conversation,
+        trace
       );
       Glean.smartWindow.getPageContent.record({
         location: mode,
@@ -91,7 +94,7 @@ export async function executeToolByName(
       break;
     }
     case GET_OPEN_TABS:
-      result = await toolFns.getOpenTabs(toolParams, conversation);
+      result = await toolFns.getOpenTabs(toolParams, conversation, trace);
       break;
     case SEARCH_BROWSING_HISTORY:
       result = await toolFns.searchBrowsingHistory(toolParams, conversation);
@@ -316,11 +319,51 @@ function filterFeatureGatedTools(tools, conversation) {
   return filtered;
 }
 
+/**
+ * Checks a parsed tool call against an evaluation turn's tool policy.
+ *
+ * @param {object} [toolPolicy] - See the fetchWithHistory `toolPolicy` option.
+ * @param {string} toolName
+ * @param {object} toolParams
+ * @returns {?{error: string, body: string}} Why the call is rejected, or null.
+ */
+function checkToolPolicy(toolPolicy, toolName, toolParams) {
+  if (toolPolicy?.allowedTools && !toolPolicy.allowedTools.includes(toolName)) {
+    return {
+      error: "tool_not_allowed",
+      body: `Tool ${toolName} is unavailable for this turn.`,
+    };
+  }
+  if (
+    toolName !== GET_PAGE_CONTENT ||
+    !toolPolicy?.allowedUrls ||
+    !Array.isArray(toolParams.url_list)
+  ) {
+    return null;
+  }
+  const allowedUrls = new Set(
+    toolPolicy.allowedUrls.map(url => url.split("#")[0])
+  );
+  if (
+    toolParams.url_list.some(
+      url => typeof url !== "string" || !allowedUrls.has(url.split("#")[0])
+    )
+  ) {
+    return {
+      error: "url_not_allowed",
+      body: "Only the supplied source URLs may be read in this turn.",
+    };
+  }
+  return null;
+}
+
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   AIWindow:
     "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
   SearchService: "moz-src:///toolkit/components/search/SearchService.sys.mjs",
+  SmartWindowTrace:
+    "moz-src:///browser/components/aiwindow/models/Trace.sys.mjs",
 });
 
 ChromeUtils.defineLazyGetter(lazy, "console", () =>
@@ -461,7 +504,6 @@ function getToolUIArgs(toolName, toolParams) {
 Object.assign(Chat, {
   lastUsage: null,
 
-  /* eslint-disable complexity -- TODO Bug 2075083 - complexity 58/54 over limit */
   /**
    * Stream assistant output with tool-call support.
    * Yields assistant text chunks as they arrive. If the model issues tool calls,
@@ -476,16 +518,48 @@ Object.assign(Chat, {
    * @param {Promise<string|null>} [options.tokenPromise] - A token
    *   fetch the caller already started, so a cold or expired token resolves
    *   alongside prompt construction rather than after it. Omit to fetch here.
+   * @param {object} [options.toolPolicy] - Restricts an evaluation turn.
+   * @param {string[]} [options.toolPolicy.allowedTools] - The only tools
+   *   offered to the model and run.
+   * @param {string[]} [options.toolPolicy.allowedUrls] - The only URLs
+   *   get_page_content may read, ignoring fragments.
+   * @param {number} [options.toolPolicy.maxModelRequests] - Fail the turn
+   *   once this many model requests still end in tool calls.
+   * @param {object} [options.traceMetadata] - Evaluation ids recorded on the
+   *   turn's local development trace.
    * @returns {Promise<ChatTurnResult | null>} Completed-turn work counts, or null
    *   if the turn was stopped early or handed off to another surface.
    */
-  async fetchWithHistory({
-    conversation,
-    browsingContext,
-    mode,
-    signal,
-    tokenPromise,
-  }) {
+  async fetchWithHistory(options) {
+    const trace = lazy.SmartWindowTrace.startTurn(options);
+    let failure = null;
+    try {
+      return await this._fetchWithHistory(options, trace);
+    } catch (error) {
+      failure = error;
+      throw error;
+    } finally {
+      trace?.endTurn(options.conversation, failure, options.signal);
+    }
+  },
+
+  /* eslint-disable complexity -- TODO Bug 2075083 - complexity 58/54 over limit */
+  /**
+   * The body of fetchWithHistory, which traces it.
+   *
+   * @param {object} options - The fetchWithHistory options.
+   * @param {?TraceSpan} trace - The turn's local development trace.
+   * @returns {Promise<ChatTurnResult | null>}
+   */
+  async _fetchWithHistory(options, trace) {
+    const {
+      conversation,
+      browsingContext,
+      mode,
+      signal,
+      tokenPromise,
+      toolPolicy,
+    } = options;
     if (!browsingContext && !Cu.isInAutomation) {
       const err = new Error(
         "The browsingContext must exist for fetchWithHistory unless we're in automation."
@@ -509,7 +583,12 @@ Object.assign(Chat, {
      * comment above tool execution for further details.
      */
     const isVerbatimQuery = currentTurn === 0;
-    const chatToolsConfig = filterFeatureGatedTools(toolsConfig, conversation);
+    let chatToolsConfig = filterFeatureGatedTools(toolsConfig, conversation);
+    if (toolPolicy?.allowedTools) {
+      chatToolsConfig = chatToolsConfig.filter(tool =>
+        toolPolicy.allowedTools.includes(tool.function.name)
+      );
+    }
 
     let fullResponseText = "";
     /** @type {ChatTurnResult} */
@@ -521,8 +600,12 @@ Object.assign(Chat, {
     // itself in a loop; the model stays free to answer or call another tool.
     const searchExecuted = conversation._searchExecutedTurn === currentTurn;
 
-    const streamModelResponse = () => {
+    const streamModelResponse = llmSpan => {
       const snapshot = conversation.compactChatCompletions();
+      llmSpan?.setModelRequest(snapshot, chatToolsConfig, {
+        ...conversation.parameters,
+        tool_choice: "auto",
+      });
 
       const stream = conversation.runWithGenerator({
         streamOptions: { enabled: true },
@@ -549,6 +632,7 @@ Object.assign(Chat, {
       return stream;
     };
 
+    let modelRequests = 0;
     while (true) {
       /** @type {ToolCall[] | null} */
       let pendingToolCalls = null;
@@ -559,11 +643,17 @@ Object.assign(Chat, {
         "chat-server-request-start"
       );
       const turnStart = ChromeUtils.now();
+      const llmSpan = trace?.startModelRequest(conversation.engine?.model);
       try {
         this.lastUsage = null;
         const response = await conversation.receiveResponse(
-          streamModelResponse()
+          streamModelResponse(llmSpan)
         );
+        llmSpan?.endModelRequest(
+          response,
+          signal?.aborted ? new Error("Model request cancelled") : null
+        );
+        modelRequests++;
         fullResponseText = response.fullResponseText;
         pendingToolCalls = response.pendingToolCalls;
         turnResult.outputTokens =
@@ -609,6 +699,15 @@ Object.assign(Chat, {
         logConversationStream(currentTurn, "STREAM END", null, "aborted");
 
         return null;
+      }
+
+      if (
+        toolPolicy?.maxModelRequests &&
+        modelRequests >= toolPolicy.maxModelRequests
+      ) {
+        throw new Error(
+          `Model request limit of ${toolPolicy.maxModelRequests} reached`
+        );
       }
 
       // Ensure all serialized tool calls have arguments and expand URL tokens.
@@ -674,6 +773,7 @@ Object.assign(Chat, {
           if (!resolveToolCall(remaining, content)) {
             continue;
           }
+          trace?.startToolCall(remaining)?.end(content.body, new Error(error));
           recordToolCallEvent({
             toolName: remaining.function?.name || "",
             mode,
@@ -740,10 +840,20 @@ Object.assign(Chat, {
 
         const { id, function: functionSpec } = toolCall;
         const toolName = functionSpec?.name || "";
+        const toolSpan = trace?.startToolCall(toolCall);
         let toolParams = {};
 
         let blockedError = "";
         let blockedBody;
+        const rejectToolCall = (error, body) => {
+          toolSpan?.end(body, new Error(error));
+          resolveToolCall(toolCall, {
+            tool_call_id: id,
+            body,
+            name: toolName,
+          });
+          recordToolCallEvent({ toolName, mode, conversation, error });
+        };
         // A search handoff already ran this turn. Block a repeat search so
         // openSidebarAndContinue cannot re-trigger the handoff in a loop.
         if (toolName === SEARCH_THE_WEB && searchExecuted) {
@@ -763,17 +873,7 @@ Object.assign(Chat, {
           }
         }
         if (blockedError) {
-          resolveToolCall(toolCall, {
-            tool_call_id: id,
-            body: blockedBody,
-            name: toolName,
-          });
-          recordToolCallEvent({
-            toolName,
-            mode,
-            conversation,
-            error: blockedError,
-          });
+          rejectToolCall(blockedError, blockedBody);
           continue;
         }
 
@@ -791,6 +891,7 @@ Object.assign(Chat, {
 
           expandUrlTokensInToolParams(toolParams, conversation.tokenToUrl);
         } catch (e) {
+          toolSpan?.end(undefined, e);
           ChromeUtils.addProfilerMarker(
             "SmartWindow",
             {},
@@ -807,6 +908,16 @@ Object.assign(Chat, {
             conversation,
             error: "invalid_arguments",
           });
+          continue;
+        }
+
+        const policyRejection = checkToolPolicy(
+          toolPolicy,
+          toolName,
+          toolParams
+        );
+        if (policyRejection) {
+          rejectToolCall(policyRejection.error, policyRejection.body);
           continue;
         }
 
@@ -827,11 +938,14 @@ Object.assign(Chat, {
         const dispatchTool = name =>
           executeToolByName(
             name,
-            toolParams,
+            name === GET_PAGE_CONTENT && signal
+              ? { ...toolParams, signal }
+              : toolParams,
             id,
             conversation,
             browsingContext,
-            mode
+            mode,
+            toolSpan
           );
 
         // Emit the tool message up front with a `pending`-marked placeholder
@@ -851,6 +965,7 @@ Object.assign(Chat, {
         }
 
         turnResult.toolCallCount++;
+        toolSpan?.markToolExecuted(toolParams);
 
         try {
           if (featureGatedHandler) {
@@ -954,6 +1069,13 @@ Object.assign(Chat, {
           toolCallError = "execution_failed";
         }
 
+        if (!directAnswerStream) {
+          toolSpan?.endToolCall(result, toolCallError, {
+            searchHandoff: isSearchHandoff,
+            cancelled: !!signal?.aborted && !isSearchHandoff,
+          });
+        }
+
         recordToolCallEvent({
           toolName,
           mode,
@@ -1002,7 +1124,12 @@ Object.assign(Chat, {
         // Same receiveResponse the model's own output goes through, so it picks
         // up the streaming updates, citations, persistence and completion.
         if (directAnswerStream) {
-          await conversation.receiveResponse(directAnswerStream);
+          const response =
+            await conversation.receiveResponse(directAnswerStream);
+          toolSpan?.endToolCall(
+            { result, text: response.fullResponseText },
+            signal?.aborted ? "Tool response cancelled" : ""
+          );
           logConversationStream(currentTurn, "STREAM END", null, toolName);
 
           return signal?.aborted ? null : turnResult;

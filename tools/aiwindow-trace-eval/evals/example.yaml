@@ -1,0 +1,26 @@
+---
+schemaVersion: 1
+name: smartwindow-example
+dataset:
+  manifest: example/manifest.json
+  cases: []
+model:
+  kind: custom
+  endpoint: http://127.0.0.1:8080/v1
+  model: ""
+  apiKeyEnv: ""
+  parameters: {}
+toolPolicy:
+  allowedTools: [get_open_tabs, get_page_content]
+  restrictUrlsToSources: true
+grader: expected_tool
+limits:
+  cases: 3
+  repetitions: 1
+  runtimeSeconds: 3600
+  caseTimeoutSeconds: 300
+  modelCallsPerCase: 8
+  totalTokens: 500000
+  maxCompletionTokens: 4096
+publish:
+  langfuse: auto

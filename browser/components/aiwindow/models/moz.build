@@ -43,6 +43,7 @@ MOZ_SRC_FILES += [
     "TitleGeneration.sys.mjs",
     "TokenStreamParser.sys.mjs",
     "Tools.sys.mjs",
+    "Trace.sys.mjs",
     "Utils.sys.mjs",
 ]
 

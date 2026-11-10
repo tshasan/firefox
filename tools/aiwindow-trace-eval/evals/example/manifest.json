@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "metadata": {
+    "name": "smartwindow-example",
+    "mode": "replay",
+    "offline": true,
+    "allowedTools": ["get_open_tabs", "get_page_content"],
+    "driver": "mochitest"
+  },
+  "scoring": {
+    "kind": "expected_tool"
+  },
+  "scenarios": [
+    {
+      "id": "read-current-page",
+      "prompt": "Read {{url0}} using get_page_content exactly once, then tell me the observatory's opening time and admission price. Base your answer only on that page. Do not search the web.",
+      "tabs": [
+        {
+          "title": "Cedar Observatory visitor guide",
+          "body": "Cedar Observatory opens at 7 PM every Friday. Admission costs 12 dollars per adult. Children under twelve enter free with a paying adult. The observatory offers a public telescope viewing session and a short introduction to the constellations. Visitors should bring warm clothing because the telescope platform is outdoors. Tickets are sold at the entrance. The visitor guide contains no information about parking prices or restaurant reservations."
+        }
+      ],
+      "activeTab": 0,
+      "reference": "Cedar Observatory opens at 7 PM every Friday. Admission is 12 dollars per adult; children under twelve enter free with a paying adult.",
+      "expectedTool": {
+        "name": "get_page_content",
+        "count": 1
+      }
+    },
+    {
+      "id": "list-fixture-tabs",
+      "prompt": "Call get_open_tabs once without a topic. List the titles of my two open tabs whose titles start with Cedar. Use the tool result only; do not read the pages or search the web.",
+      "tabs": [
+        {
+          "title": "Cedar Observatory visitor guide",
+          "body": "Cedar Observatory provides a Friday evening public telescope session. Visitors can learn to recognize several constellations, observe the Moon, and ask staff questions about astronomy. This page is the observatory visitor guide."
+        },
+        {
+          "title": "Cedar Library workshop schedule",
+          "body": "Cedar Library offers a Saturday morning writing workshop. The workshop welcomes adults and teenagers and includes time for drafting and discussion. This page contains the library workshop schedule and attendance information."
+        }
+      ],
+      "activeTab": 0,
+      "reference": "The two Cedar tab titles are Cedar Observatory visitor guide and Cedar Library workshop schedule.",
+      "expectedTool": {
+        "name": "get_open_tabs",
+        "count": 1
+      }
+    },
+    {
+      "id": "missing-page-fact",
+      "prompt": "Read {{url0}} using get_page_content exactly once. What is the telescope's mirror diameter? If the page does not say, explicitly say it is not stated. Do not guess or search the web.",
+      "tabs": [
+        {
+          "title": "Cedar Observatory equipment notes",
+          "body": "Cedar Observatory has one public telescope on an outdoor viewing platform. Staff select suitable targets based on cloud cover and the time of year. The observatory recommends bringing warm clothing and arriving fifteen minutes before the session. Children must be accompanied by an adult. The equipment notes do not state the telescope's mirror diameter, manufacturer, focal length, or purchase date. Visitors may ask staff about these details during a guided visit."
+        }
+      ],
+      "activeTab": 0,
+      "reference": "The page does not state the telescope's mirror diameter.",
+      "expectedTool": {
+        "name": "get_page_content",
+        "count": 1
+      }
+    }
+  ]
+}
